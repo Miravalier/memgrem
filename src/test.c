@@ -13,6 +13,6 @@ int main(void) {
         sched_yield();
     }
 
-    printf("Value mutated!\n");
+    printf("Value mutated to %d!\n", x);
     return 0;
 }

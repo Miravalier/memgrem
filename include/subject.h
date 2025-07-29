@@ -39,6 +39,7 @@ typedef union scan_value {
 typedef struct subject {
     pid_t pid;
     pthread_t thread_id;
+    struct scan *scans;
 } subject_t;
 
 
@@ -48,14 +49,17 @@ typedef struct scan {
     size_t *hits;
     size_t hit_count;
     size_t hit_capacity;
+    struct scan *next;
+    struct scan *prev;
 } scan_t;
 
 
 subject_t *subject_create(pid_t pid);
-scan_t *subject_begin_scan(const subject_t *subject, scan_type_e type);
+scan_t *subject_begin_scan(subject_t *subject, scan_type_e type);
 void subject_free(subject_t *subject);
 
-scan_t *scan_fork(const scan_t *scan);
+scan_t *scan_fork(scan_t *scan);
+bool scan_set_value(scan_t *scan, ...);
 bool scan_update(scan_t *scan, ...);
 void scan_print(scan_t *scan);
 void scan_free(scan_t *scan);

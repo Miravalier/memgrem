@@ -31,29 +31,53 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    printf("[!] Beginning scan\n");
-    scan_t *scan = subject_begin_scan(subject, SCANTYPE_INT32);
-    if (scan == NULL) {
-        return 1;
+    // Wide scan, all 0's
+    {
+        printf("[!] Beginning scan\n");
+        scan_t *scan = subject_begin_scan(subject, SCANTYPE_INT32);
+        if (scan == NULL) {
+            return 1;
+        }
+
+        printf("[!] Updating scan\n");
+        if (!scan_update(scan, (int32_t)0)) {
+            printf("[!] Scan failed!\n");
+            return 1;
+        }
+
+        scan_print(scan);
+
+        printf("[!] Updating scan\n");
+        if (!scan_update(scan, (int32_t)1)) {
+            printf("[!] Scan failed!\n");
+            return 1;
+        }
+
+        scan_print(scan);
     }
 
-    printf("[!] Updating scan\n");
-    if (!scan_update(scan, (int32_t)0)) {
-        printf("[!] Scan failed!\n");
-        return 1;
+    // Narrow scan, find value and change it
+    {
+        printf("[!] Beginning scan\n");
+        scan_t *scan = subject_begin_scan(subject, SCANTYPE_INT32);
+        if (scan == NULL) {
+            return 1;
+        }
+
+        printf("[!] Updating scan\n");
+        if (!scan_update(scan, (int32_t)0x462dc346)) {
+            printf("[!] Scan failed!\n");
+            return 1;
+        }
+
+        scan_print(scan);
+
+        if (!scan_set_value(scan, (int32_t)0x1000)) {
+            printf("[!] Set value failed!\n");
+            return 1;
+        }
     }
 
-    scan_print(scan);
-
-    printf("[!] Updating scan\n");
-    if (!scan_update(scan, (int32_t)1)) {
-        printf("[!] Scan failed!\n");
-        return 1;
-    }
-
-    scan_print(scan);
-
-    scan_free(scan);
     subject_free(subject);
 
     return 0;

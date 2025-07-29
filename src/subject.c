@@ -41,7 +41,7 @@ static int open_maps(pid_t pid) {
 }
 
 
-static int open_memory(pid_t pid) {
+static int memory_open(pid_t pid) {
     char memory_path[32] = {0};
     snprintf(memory_path, 31, "/proc/%d/mem", pid);
     return open(memory_path, O_RDWR);
@@ -164,7 +164,30 @@ subject_t *subject_create(pid_t pid) {
 }
 
 
-scan_t *subject_begin_scan(const subject_t *subject, scan_type_e type) {
+static void push_scan(scan_t *scan) {
+    scan->next = scan->subject->scans;
+    scan->prev = NULL;
+    scan->subject->scans = scan;
+    if (scan->next != NULL) {
+        scan->next->prev = scan;
+    }
+}
+
+
+static void pop_scan(scan_t *scan) {
+    if (scan->prev != NULL) {
+        scan->prev->next = scan->next;
+    }
+    if (scan->next != NULL) {
+        scan->next->prev = scan->prev;
+    }
+    if (scan->subject->scans == scan) {
+        scan->subject->scans = scan->next;
+    }
+}
+
+
+scan_t *subject_begin_scan(subject_t *subject, scan_type_e type) {
     if (subject == NULL) {
         return NULL;
     }
@@ -176,6 +199,7 @@ scan_t *subject_begin_scan(const subject_t *subject, scan_type_e type) {
     scan->hit_count = 0;
     scan->hit_capacity = 0;
 
+    push_scan(scan);
     return scan;
 }
 
@@ -183,6 +207,9 @@ scan_t *subject_begin_scan(const subject_t *subject, scan_type_e type) {
 void subject_free(subject_t *subject) {
     if (subject == NULL) {
         return;
+    }
+    while (subject->scans != NULL) {
+        scan_free(subject->scans);
     }
     free(subject);
 }
@@ -264,11 +291,12 @@ size_t scan_type_size(scan_type_e type) {
 }
 
 
-scan_t *scan_fork(const scan_t *scan) {
+scan_t *scan_fork(scan_t *scan) {
     scan_t *result = malloc(sizeof(scan_t));
     memcpy(result, scan, sizeof(scan_t));
     result->hits = malloc(sizeof(size_t) * scan->hit_count);
     memcpy(result->hits, scan->hits, sizeof(size_t) * scan->hit_count);
+    push_scan(result);
     return result;
 }
 
@@ -312,7 +340,7 @@ bool scan_update(scan_t *scan, ...) {
         goto EXIT;
     }
 
-    memory_fd = open_memory(pid);
+    memory_fd = memory_open(pid);
     if (memory_fd == -1) {
         fprintf(stderr, "error: failed to open /proc/<pid>/mem: %s\n", strerror(errno));
         goto EXIT;
@@ -364,6 +392,75 @@ bool scan_update(scan_t *scan, ...) {
 }
 
 
+bool scan_set_value(scan_t *scan, ...) {
+    int memory_fd = -1;
+    bool success = false;
+    bool attached = false;
+    subject_t *subject = scan->subject;
+    pid_t pid = subject->pid;
+
+    scan_value_u value;
+    va_list args;
+    va_start(args, scan);
+
+    switch (scan->type)
+    {
+        case SCANTYPE_UINT8: value.uint8 = (uint8_t)va_arg(args, unsigned); break;
+        case SCANTYPE_UINT16: value.uint16 = (uint16_t)va_arg(args, unsigned); break;
+        case SCANTYPE_UINT32: value.uint32 = va_arg(args, uint32_t); break;
+        case SCANTYPE_UINT64: value.uint64 = va_arg(args, uint64_t); break;
+        case SCANTYPE_INT8: value.int8 = (int8_t)va_arg(args, int); break;
+        case SCANTYPE_INT16: value.int16 = (int16_t)va_arg(args, int); break;
+        case SCANTYPE_INT32: value.int32 = va_arg(args, int32_t); break;
+        case SCANTYPE_INT64: value.int64 = va_arg(args, int64_t); break;
+        case SCANTYPE_FLOAT32: value.float32 = (float)va_arg(args, double); break;
+        case SCANTYPE_FLOAT64: value.float64 = va_arg(args, double); break;
+    }
+
+    va_end(args);
+
+    if (ptrace(PTRACE_ATTACH, pid, 0L, 0L) == -1) {
+        fprintf(stderr, "error: failed to ptrace attach: %s\n", strerror(errno));
+        goto EXIT;
+    }
+    attached = true;
+
+    int status;
+    if (waitpid(pid, &status, 0) == -1) {
+        fprintf(stderr, "error: failed to waitpid: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    memory_fd = memory_open(pid);
+    if (memory_fd == -1) {
+        fprintf(stderr, "error: failed to open /proc/<pid>/mem: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    size_t value_size = scan_type_size(scan->type);
+    for (size_t i=0; i < scan->hit_count; i++) {
+        size_t hit = scan->hits[i];
+        lseek(memory_fd, hit, SEEK_SET);
+        write(memory_fd, &value, value_size);
+    }
+
+    success = true;
+
+  EXIT:
+    if (attached) {
+        if (ptrace(PTRACE_DETACH, pid, 0L, 0L) == -1) {
+            fprintf(stderr, "error: failed to ptrace detach: %s\n", strerror(errno));
+            return false;
+        }
+    }
+    if (memory_fd != -1) {
+        close(memory_fd);
+    }
+
+    return success;
+}
+
+
 void scan_print(scan_t *scan) {
     if (scan->hit_count == 0) {
         printf("[0 hits] (No values matched)\n");
@@ -384,6 +481,8 @@ void scan_free(scan_t *scan) {
     if (scan == NULL) {
         return;
     }
+
+    pop_scan(scan);
 
     if (scan->hits != NULL) {
         free(scan->hits);
