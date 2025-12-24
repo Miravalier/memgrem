@@ -60,6 +60,7 @@ typedef enum search_op_e {
     SEARCH_EQUAL,
     SEARCH_LESS,
     SEARCH_GREATER,
+    SEARCH_APPROX,
 } search_op_e;
 
 

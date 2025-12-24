@@ -158,6 +158,10 @@ static bool generic_compare(scan_type_e type, search_op_e op, const void *a, con
             return *(float*)a >= *(float*)b;
         } else if (op == SEARCH_LESS) {
             return *(float*)a <= *(float*)b;
+        } else if (op == SEARCH_APPROX) {
+            float a_value = *(float*)a;
+            float b_value = *(float*)b;
+            return (a_value >= b_value - 1.5f) && (a_value <= b_value + 1.5f);
         }
     } else if (type == SCANTYPE_FLOAT64) {
         if (op == SEARCH_EQUAL) {
@@ -166,6 +170,10 @@ static bool generic_compare(scan_type_e type, search_op_e op, const void *a, con
             return *(double*)a >= *(double*)b;
         } else if (op == SEARCH_LESS) {
             return *(double*)a <= *(double*)b;
+        } else if (op == SEARCH_APPROX) {
+            double a_value = *(double*)a;
+            double b_value = *(double*)b;
+            return (a_value >= b_value - 1.5) && (a_value <= b_value + 1.5);
         }
     }
     return false;
