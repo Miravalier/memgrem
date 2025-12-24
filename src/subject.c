@@ -137,6 +137,141 @@ static void free_maps(maps_t *maps) {
 }
 
 
+static void generic_retrieve(scan_type_e type, void *dst, const void *src) {
+    if (type == SCANTYPE_FLOAT32) {
+        *(float*)dst = *(float*)src;
+    } else if (type == SCANTYPE_FLOAT64) {
+        *(double*)dst = *(double*)src;
+    }
+}
+
+
+static bool generic_compare(scan_type_e type, search_op_e op, const void *a, const void *b) {
+    if (op == SEARCH_NOOP) {
+        return true;
+    }
+
+    if (type == SCANTYPE_FLOAT32) {
+        if (op == SEARCH_EQUAL) {
+            return *(float*)a == *(float*)b;
+        } else if (op == SEARCH_GREATER) {
+            return *(float*)a >= *(float*)b;
+        } else if (op == SEARCH_LESS) {
+            return *(float*)a <= *(float*)b;
+        }
+    } else if (type == SCANTYPE_FLOAT64) {
+        if (op == SEARCH_EQUAL) {
+            return *(double*)a == *(double*)b;
+        } else if (op == SEARCH_GREATER) {
+            return *(double*)a >= *(double*)b;
+        } else if (op == SEARCH_LESS) {
+            return *(double*)a <= *(double*)b;
+        }
+    }
+    return false;
+}
+
+
+static bool memory_search(scan_t *scan, int fd, size_t offset, size_t size, void *needle, size_t needle_size, search_op_e op) {
+    if (lseek(fd, offset, SEEK_SET) == -1) {
+        fprintf(stderr, "error: failed to lseek memory file: %s\n", strerror(errno));
+        return false;
+    }
+
+    uint8_t buffer[65536];
+    size_t bytes_remaining = size;
+    while (bytes_remaining > 0) {
+        size_t read_size = MIN(bytes_remaining, 65536);
+        ssize_t read_result = read(fd, buffer, read_size);
+        if (read_result < 0) {
+            return false;
+        }
+        else if (read_result == 0) {
+            break;
+        }
+        bytes_remaining -= (size_t)read_result;
+
+        uint8_t *cursor = buffer;
+        size_t cursor_size = (size_t)read_result;
+        uint8_t *match;
+
+        if (op == SEARCH_EQUAL) {
+            while ((match = memmem(cursor, cursor_size, needle, needle_size))) {
+                if (scan->hit_count == scan->hit_capacity) {
+                    scan->hit_capacity *= 2;
+                    scan->hits = realloc(scan->hits, scan->hit_capacity * sizeof(size_t));
+                    if (scan->hits == NULL) {
+                        return false;
+                    }
+                }
+                scan->hits[scan->hit_count++] = offset + (match - buffer);
+                cursor_size -= ((match + needle_size) - cursor);
+                cursor = match + needle_size;
+            }
+        } else {
+            for (size_t i=0; i + needle_size < cursor_size; i += needle_size) {
+                if (generic_compare(scan->type, op, cursor + i, needle)) {
+                    if (scan->hit_count == scan->hit_capacity) {
+                        scan->hit_capacity *= 2;
+                        scan->hits = realloc(scan->hits, scan->hit_capacity * sizeof(size_t));
+                        if (scan->hits == NULL) {
+                            return false;
+                        }
+                    }
+                    scan->hits[scan->hit_count++] = offset + i;
+                }
+            }
+        }
+
+        offset += (size_t)read_result;
+    }
+
+    return true;
+}
+
+
+static bool memory_filter(scan_t *scan, int fd, void *value, size_t value_size, search_op_e op) {
+    uint8_t buffer[sizeof(scan_value_u)];
+    size_t old_hit_count = scan->hit_count;
+    scan->hit_count = 0;
+    for (size_t i=0; i < old_hit_count; i++) {
+        size_t hit_location = scan->hits[i];
+        lseek(fd, hit_location, SEEK_SET);
+        read(fd, buffer, value_size);
+        if (generic_compare(scan->type, op, buffer, value)) {
+            if (scan->hit_count < 32) {
+                generic_retrieve(scan->type, scan->values + scan->hit_count, buffer);
+            }
+            scan->hits[scan->hit_count++] = hit_location;
+        }
+    }
+    return true;
+}
+
+
+static void push_scan(scan_t *scan) {
+    scan->next = scan->subject->scans;
+    scan->prev = NULL;
+    scan->subject->scans = scan;
+    if (scan->next != NULL) {
+        scan->next->prev = scan;
+    }
+}
+
+
+static void pop_scan(scan_t *scan) {
+    if (scan->prev != NULL) {
+        scan->prev->next = scan->next;
+    }
+    if (scan->next != NULL) {
+        scan->next->prev = scan->prev;
+    }
+    if (scan->subject->scans == scan) {
+        scan->subject->scans = scan->next;
+    }
+}
+
+
 subject_t *subject_create(pid_t pid) {
     subject_t *subject = calloc(1, sizeof(subject_t));
     subject->pid = pid;
@@ -161,29 +296,6 @@ subject_t *subject_create(pid_t pid) {
     }
 
     return subject;
-}
-
-
-static void push_scan(scan_t *scan) {
-    scan->next = scan->subject->scans;
-    scan->prev = NULL;
-    scan->subject->scans = scan;
-    if (scan->next != NULL) {
-        scan->next->prev = scan;
-    }
-}
-
-
-static void pop_scan(scan_t *scan) {
-    if (scan->prev != NULL) {
-        scan->prev->next = scan->next;
-    }
-    if (scan->next != NULL) {
-        scan->next->prev = scan->prev;
-    }
-    if (scan->subject->scans == scan) {
-        scan->subject->scans = scan->next;
-    }
 }
 
 
@@ -215,64 +327,6 @@ void subject_free(subject_t *subject) {
 }
 
 
-bool memory_search(scan_t *scan, int fd, size_t offset, size_t size, void *needle, size_t needle_size) {
-    if (lseek(fd, offset, SEEK_SET) == -1) {
-        fprintf(stderr, "error: failed to lseek memory file: %s\n", strerror(errno));
-        return false;
-    }
-
-    uint8_t buffer[65536];
-    size_t bytes_remaining = size;
-    while (bytes_remaining > 0) {
-        size_t read_size = MIN(bytes_remaining, 65536);
-        ssize_t read_result = read(fd, buffer, read_size);
-        if (read_result < 0) {
-            return false;
-        }
-        else if (read_result == 0) {
-            break;
-        }
-        bytes_remaining -= (size_t)read_result;
-
-        uint8_t *cursor = buffer;
-        size_t cursor_size = (size_t)read_result;
-        uint8_t *match;
-        while ((match = memmem(cursor, cursor_size, needle, needle_size))) {
-            if (scan->hit_count == scan->hit_capacity) {
-                scan->hit_capacity *= 2;
-                scan->hits = realloc(scan->hits, scan->hit_capacity * sizeof(size_t));
-                if (scan->hits == NULL) {
-                    return false;
-                }
-            }
-            scan->hits[scan->hit_count++] = offset + (match - buffer);
-            cursor_size -= ((match + needle_size) - cursor);
-            cursor = match + needle_size;
-        }
-
-        offset += (size_t)read_result;
-    }
-
-    return true;
-}
-
-
-bool memory_filter(scan_t *scan, int fd, void *value, size_t value_size) {
-    uint8_t buffer[sizeof(scan_value_u)];
-    size_t old_hit_count = scan->hit_count;
-    scan->hit_count = 0;
-    for (size_t i=0; i < old_hit_count; i++) {
-        size_t hit_location = scan->hits[i];
-        lseek(fd, hit_location, SEEK_SET);
-        read(fd, buffer, value_size);
-        if (memcmp(buffer, value, value_size) == 0) {
-            scan->hits[scan->hit_count++] = hit_location;
-        }
-    }
-    return true;
-}
-
-
 size_t scan_type_size(scan_type_e type) {
     switch (type)
     {
@@ -301,7 +355,65 @@ scan_t *scan_fork(scan_t *scan) {
 }
 
 
-bool scan_update(scan_t *scan, ...) {
+bool scan_refresh(scan_t *scan) {
+    int memory_fd = -1;
+    bool success = false;
+    bool attached = false;
+    subject_t *subject = scan->subject;
+    pid_t pid = subject->pid;
+
+    if (ptrace(PTRACE_ATTACH, pid, 0L, 0L) == -1) {
+        fprintf(stderr, "error: failed to ptrace attach: %s\n", strerror(errno));
+        goto EXIT;
+    }
+    attached = true;
+
+    int status;
+    if (waitpid(pid, &status, 0) == -1) {
+        fprintf(stderr, "error: failed to waitpid: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    memory_fd = memory_open(pid);
+    if (memory_fd == -1) {
+        fprintf(stderr, "error: failed to open /proc/<pid>/mem: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    if (!memory_filter(scan, memory_fd, NULL, scan_type_size(scan->type), SEARCH_NOOP)) {
+        goto EXIT;
+    }
+
+    success = true;
+
+  EXIT:
+    if (attached) {
+        if (ptrace(PTRACE_DETACH, pid, 0L, 0L) == -1) {
+            fprintf(stderr, "error: failed to ptrace detach: %s\n", strerror(errno));
+            return false;
+        }
+    }
+    if (memory_fd != -1) {
+        close(memory_fd);
+    }
+
+    return success;
+}
+
+
+void scan_eliminate(scan_t *scan, size_t index) {
+    if (index >= scan->hit_count) {
+        return;
+    }
+
+    if (index < scan->hit_count - 1) {
+        memmove(scan->hits + index, scan->hits + index + 1, (scan->hit_count - index) * sizeof(size_t));
+    }
+    scan->hit_count--;
+}
+
+
+bool scan_update(scan_t *scan, search_op_e op, ...) {
     int memory_fd = -1;
     bool success = false;
     bool attached = false;
@@ -310,7 +422,7 @@ bool scan_update(scan_t *scan, ...) {
 
     scan_value_u value;
     va_list args;
-    va_start(args, scan);
+    va_start(args, op);
 
     switch (scan->type)
     {
@@ -362,7 +474,7 @@ bool scan_update(scan_t *scan, ...) {
         scan->hit_count = 0;
         for (size_t i=0; i < maps->region_count; i++) {
             region_t *region = &maps->regions[i];
-            if (!memory_search(scan, memory_fd, region->offset, region->size, &value, scan_type_size(scan->type))) {
+            if (!memory_search(scan, memory_fd, region->offset, region->size, &value, scan_type_size(scan->type), op)) {
                 free_maps(maps);
                 goto EXIT;
             }
@@ -370,7 +482,7 @@ bool scan_update(scan_t *scan, ...) {
 
         free_maps(maps);
     } else {
-        if (!memory_filter(scan, memory_fd, &value, scan_type_size(scan->type))) {
+        if (!memory_filter(scan, memory_fd, &value, scan_type_size(scan->type), op)) {
             goto EXIT;
         }
     }

@@ -49,9 +49,18 @@ typedef struct scan {
     size_t *hits;
     size_t hit_count;
     size_t hit_capacity;
+    scan_value_u values[32];
     struct scan *next;
     struct scan *prev;
 } scan_t;
+
+
+typedef enum search_op_e {
+    SEARCH_NOOP,
+    SEARCH_EQUAL,
+    SEARCH_LESS,
+    SEARCH_GREATER,
+} search_op_e;
 
 
 subject_t *subject_create(pid_t pid);
@@ -60,9 +69,13 @@ void subject_free(subject_t *subject);
 
 scan_t *scan_fork(scan_t *scan);
 bool scan_set_value(scan_t *scan, ...);
-bool scan_update(scan_t *scan, ...);
+bool scan_update(scan_t *scan, search_op_e op, ...);
+void scan_eliminate(scan_t *scan, size_t index);
+bool scan_refresh(scan_t *scan);
 void scan_print(scan_t *scan);
 void scan_free(scan_t *scan);
+
+size_t scan_type_size(scan_type_e type);
 
 
 #endif

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
 project(MemGrem)
 add_executable(test src/test.c)
-add_executable(memgrem src/main.c src/subject.c)
+add_executable(memgrem src/main.c src/subject.c src/string_list.c)
 target_include_directories(memgrem PUBLIC include)
