@@ -27,7 +27,6 @@ typedef struct region
 } region_t;
 
 
-
 typedef struct maps {
     region_t *regions;
     size_t region_count;

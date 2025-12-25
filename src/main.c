@@ -251,7 +251,12 @@ int main(int argc, char **argv) {
         fprintf(stderr, "error: invalid mode '%s'\n", mode);
         fprintf(stderr, "usage: %s <pid> [all|float|f32|f64]\n", argv[0]);
     }
-    printf("%zu scans created\n", scan_count);
+
+    if (scan_count == 1) {
+        printf("1 scan created\n");
+    } else {
+        printf("%zu scans created\n", scan_count);
+    }
 
     while (true) {
         command_u command;
