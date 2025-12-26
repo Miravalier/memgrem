@@ -24,6 +24,7 @@ typedef struct region
     bool read;
     bool write;
     bool exec;
+    char filename[256];
 } region_t;
 
 
@@ -96,7 +97,7 @@ static maps_t *read_maps(pid_t pid) {
         unsigned long start, end;
         char read, write, exec, cow;
         int offset, dev_major, dev_minor, inode;
-        char filename[255] = {0};
+        char filename[256] = {0};
 
         int scan_result = sscanf(
             line, "%lx-%lx %c%c%c%c %x %x:%x %u %[^\n]", &start, &end, &read,
@@ -116,14 +117,20 @@ static maps_t *read_maps(pid_t pid) {
         region->read = (read == 'r');
         region->write = (write == 'w');
         region->exec = (exec == 'x');
-
-        if (!region->read || !region->write) {
-            maps->region_count--;
-        }
+        strcpy(region->filename, filename);
     }
 
     close(fd);
     return maps;
+}
+
+
+static void print_maps(maps_t *maps) {
+    printf("Offset           Size     RWX Name\n");
+    for (size_t i=0; i < maps->region_count; i++) {
+        region_t *region = maps->regions + i;
+        printf("%016zx %08zx %c%c%c %s\n", region->offset, region->size, (region->read?'r':'-'), (region->write?'w':'-'), (region->exec?'x':'-'), region->filename);
+    }
 }
 
 
@@ -204,6 +211,9 @@ static bool memory_search(scan_t *scan, int fd, size_t offset, size_t size, void
 
         if (op == SEARCH_EQUAL) {
             while ((match = memmem(cursor, cursor_size, needle, needle_size))) {
+                if (scan->hit_count < 32) {
+                    generic_retrieve(scan->type, scan->values + scan->hit_count, match);
+                }
                 if (scan->hit_count == scan->hit_capacity) {
                     scan->hit_capacity *= 2;
                     scan->hits = realloc(scan->hits, scan->hit_capacity * sizeof(size_t));
@@ -218,6 +228,9 @@ static bool memory_search(scan_t *scan, int fd, size_t offset, size_t size, void
         } else {
             for (size_t i=0; i + needle_size < cursor_size; i += needle_size) {
                 if (generic_compare(scan->type, op, cursor + i, needle)) {
+                    if (scan->hit_count < 32) {
+                        generic_retrieve(scan->type, scan->values + scan->hit_count, cursor + i);
+                    }
                     if (scan->hit_count == scan->hit_capacity) {
                         scan->hit_capacity *= 2;
                         scan->hits = realloc(scan->hits, scan->hit_capacity * sizeof(size_t));
@@ -481,6 +494,9 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
         scan->hit_count = 0;
         for (size_t i=0; i < maps->region_count; i++) {
             region_t *region = &maps->regions[i];
+            if (!region->read || !region->write) {
+                continue;
+            }
             if (!memory_search(scan, memory_fd, region->offset, region->size, &value, scan_type_size(scan->type), op)) {
                 free_maps(maps);
                 goto EXIT;

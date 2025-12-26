@@ -396,12 +396,18 @@ int main(int argc, char **argv) {
                 scan_value_u value = float32_scan->values[i];
                 printf("%zu. %f 0x%zx (Float32)\n", hit_index+i, value.float32, float32_scan->hits[i]);
             }
+            if (float32_scan->hit_count >= 32) {
+                printf("...\n");
+            }
             hit_index += float32_scan->hit_count;
         }
         if (float64_scan) {
             for (size_t i=0; i < 32 && i < float64_scan->hit_count; i++) {
                 scan_value_u value = float64_scan->values[i];
                 printf("%zu. %lf 0x%zx (Float64)\n", hit_index+i, value.float64, float64_scan->hits[i]);
+            }
+            if (float64_scan->hit_count >= 32) {
+                printf("...\n");
             }
             hit_index += float64_scan->hit_count;
         }
