@@ -20,7 +20,15 @@
 #include "string_list.h"
 #include "subject.h"
 
+
+#define SYSCALL_READ    0
+#define SYSCALL_WRITE   1
+#define SYSCALL_OPEN    2
+#define SYSCALL_CLOSE   3
 #define SYSCALL_MMAP    9
+#define SYSCALL_MUNMAP  11
+#define SYSCALL_MEMFD   319
+
 #define PERM_READ       4
 #define PERM_WRITE      2
 #define PERM_EXEC       1
@@ -57,6 +65,72 @@ static int memory_fd_open(pid_t pid) {
     char memory_path[32] = {0};
     snprintf(memory_path, 31, "/proc/%d/mem", pid);
     return open(memory_path, O_RDWR);
+}
+
+
+static const char *syscall_strerror(uintptr_t rax) {
+    int err_code = (int)(-(intptr_t)rax);
+    return strerror(err_code);
+}
+
+
+bool read_file(const char *name, uint8_t **contents_out, size_t *size_out)
+{
+    bool success = false;
+    uint8_t *contents = NULL;
+    size_t capacity = 4096;
+    size_t filesize = 0;
+    int fd = -1;
+
+    fd = open(name, O_RDONLY);
+    if (fd == -1) {
+        goto CLEANUP;
+    }
+
+    contents = malloc(capacity);
+    if (contents == NULL) {
+        fprintf(stderr, "error: out of memory while allocating file contents capacity\n");
+        goto CLEANUP;
+    }
+
+    ssize_t bytes_read;
+    do {
+        if (capacity - filesize < 4096) {
+            capacity *= 2;
+            uint8_t *resized_buffer = realloc(contents, capacity);
+            if (resized_buffer == NULL) {
+                fprintf(stderr, "error: out of memory while growing file contents capacity\n");
+                goto CLEANUP;
+            }
+            contents = resized_buffer;
+        }
+        bytes_read = read(fd, contents + filesize, capacity - (filesize + 1));
+        if (bytes_read < 0) {
+            goto CLEANUP;
+        }
+        filesize += (ssize_t)bytes_read;
+    } while (bytes_read > 0);
+    contents[filesize] = '\0';
+
+    success = true;
+
+  CLEANUP:
+    if (fd != -1) {
+        close(fd);
+    }
+
+    if (success) {
+        *contents_out = contents;
+        *size_out = filesize;
+    } else {
+        *contents_out = NULL;
+        *size_out = 0;
+        if (contents != NULL) {
+            free(contents);
+        }
+    }
+
+    return success;
 }
 
 
@@ -498,7 +572,7 @@ subject_t *subject_create(pid_t pid) {
 }
 
 
-bool subject_inject_syscall(subject_t *subject, uintptr_t *result,
+static bool subject_inject_syscall(subject_t *subject, uintptr_t *result,
         int syscall, uintptr_t rdi, uintptr_t rsi, uintptr_t rdx, uintptr_t r10, uintptr_t r8, uintptr_t r9)
 {
     bool success = false;
@@ -576,7 +650,10 @@ bool subject_inject_syscall(subject_t *subject, uintptr_t *result,
         fprintf(stderr, "error: failed to ptrace GETREGS: %s\n", strerror(errno));
         goto EXIT;
     }
-    *result = registers.rax;
+
+    if (result) {
+        *result = registers.rax;
+    }
 
     // Restore backup code to RIP
     if (!memory_write(memory_fd, backup_code, starting_registers.rip, sizeof(backup_code))) {
@@ -597,11 +674,47 @@ bool subject_inject_syscall(subject_t *subject, uintptr_t *result,
 }
 
 
+bool subject_inject_syscall0(subject_t *subject, uintptr_t *result, int syscall) {
+    return subject_inject_syscall(subject, result, syscall, 0, 0, 0, 0, 0, 0);
+}
+
+
+bool subject_inject_syscall1(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1) {
+    return subject_inject_syscall(subject, result, syscall, arg1, 0, 0, 0, 0, 0);
+}
+
+
+bool subject_inject_syscall2(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2) {
+    return subject_inject_syscall(subject, result, syscall, arg1, arg2, 0, 0, 0, 0);
+}
+
+
+bool subject_inject_syscall3(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3) {
+    return subject_inject_syscall(subject, result, syscall, arg1, arg2, arg3, 0, 0, 0);
+}
+
+
+bool subject_inject_syscall4(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4) {
+    return subject_inject_syscall(subject, result, syscall, arg1, arg2, arg3, arg4, 0, 0);
+}
+
+
+bool subject_inject_syscall5(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4, uintptr_t arg5) {
+    return subject_inject_syscall(subject, result, syscall, arg1, arg2, arg3, arg4, arg5, 0);
+}
+
+
+bool subject_inject_syscall6(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4, uintptr_t arg5, uintptr_t arg6) {
+    return subject_inject_syscall(subject, result, syscall, arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
+
 bool subject_inject_so(subject_t *subject, const char *so_path) {
     bool success = false;
+    uint8_t *so_file_contents = NULL;
+    size_t so_file_size = 0;
     int status;
-    char so_path_buffer[256] = {0};
-    strncpy(so_path_buffer, so_path, 255);
+    uintptr_t result;
 
     if (!subject_attach(subject)) {
         fprintf(stderr, "error: failed to subject attach\n");
@@ -610,6 +723,11 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
 
     pid_t pid = subject->pid;
     int memory_fd = subject->memory_fd;
+
+    if (!read_file(so_path, &so_file_contents, &so_file_size)) {
+        fprintf(stderr, "error: failed to read so from \"%s\"\n", so_path);
+        goto EXIT;
+    }
 
     // Find our own offset from libc to dlopen and dlerror
     maps_t *self_maps = read_maps(0);
@@ -643,23 +761,67 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
     }
 
     // Create mmap region
-    uintptr_t subject_mmap_region;
-    if (!subject_inject_syscall(subject, &subject_mmap_region, SYSCALL_MMAP, 0, 4096, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)) {
-        fprintf(stderr, "error: syscall injection failed\n");
+    if (!subject_inject_syscall6(subject, &result, SYSCALL_MMAP, 0, 8192, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)) {
+        fprintf(stderr, "error: mmap syscall injection failed\n");
         goto EXIT;
     }
-
-    if ((intptr_t)subject_mmap_region < 0) {
-        int err_code = (int)(-(intptr_t)subject_mmap_region);
-        fprintf(stderr, "error: subject mmap failed: %s\n", strerror(err_code));
+    if ((intptr_t)result < 0) {
+        fprintf(stderr, "error: subject mmap() failed: %s\n", syscall_strerror(result));
         goto EXIT;
     }
-
+    uintptr_t subject_mmap_region = result;
     uintptr_t subject_code_region = subject_mmap_region + 0;
-    uintptr_t subject_string_region = subject_code_region + 256;
+    uintptr_t subject_data_region = subject_code_region + 4096;
 
-    // Write the so_path and the injected code to the subject mmap'd area
-    if (!memory_write(memory_fd, so_path_buffer, subject_string_region, sizeof(so_path_buffer))) {
+    // Write the tmp filename to the subject mmap'd area for open()
+    const char *tmp_filename = "/tmp/memgrem-inject.so";
+    if (!memory_write(memory_fd, tmp_filename, subject_data_region, strlen(tmp_filename) + 1)) {
+        goto EXIT;
+    }
+
+    // Create the so file in the subject's filesystem
+    if (!subject_inject_syscall3(subject, &result, SYSCALL_OPEN, subject_data_region, O_CREAT|O_TRUNC|O_WRONLY, 0664)) {
+        fprintf(stderr, "error: open syscall injection failed\n");
+        goto EXIT;
+    }
+    if ((intptr_t)result < 0) {
+        fprintf(stderr, "error: subject open() failed: %s\n", syscall_strerror(result));
+        goto EXIT;
+    }
+    int subject_fd = (int)result;
+
+    // Write the contents of the file page by page
+    size_t bytes_written = 0;
+    while (bytes_written < so_file_size) {
+        size_t chunk_size = MIN(4096, so_file_size - bytes_written);
+        if (!memory_write(memory_fd, so_file_contents + bytes_written, subject_data_region, chunk_size)) {
+            goto EXIT;
+        }
+
+        if (!subject_inject_syscall3(subject, &result, SYSCALL_WRITE, subject_fd, subject_data_region, chunk_size)) {
+            fprintf(stderr, "error: write syscall injection failed\n");
+            goto EXIT;
+        }
+        if ((intptr_t)result <= 0) {
+            fprintf(stderr, "error: subject write() failed: %s\n", syscall_strerror(result));
+            goto EXIT;
+        }
+
+        bytes_written += (size_t)result;
+    }
+
+    // Close the fd in the subject's memory
+    if (!subject_inject_syscall1(subject, &result, SYSCALL_CLOSE, subject_fd)) {
+        fprintf(stderr, "error: close syscall injection failed\n");
+        goto EXIT;
+    }
+    if ((intptr_t)result < 0) {
+        fprintf(stderr, "error: subject open() failed: %s\n", syscall_strerror(result));
+        goto EXIT;
+    }
+
+    // Write the tmp filename back to the subject mmap'd area for dlopen()
+    if (!memory_write(memory_fd, tmp_filename, subject_data_region, strlen(tmp_filename) + 1)) {
         goto EXIT;
     }
 
@@ -684,7 +846,7 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
     memcpy(&modified_registers, &starting_registers, sizeof(struct user_regs_struct));
     modified_registers.rip = subject_code_region + 2; // Two NOPs were added, in case the kernel subtracts 2 from RIP
     modified_registers.rax = subject_dlopen_address; // RAX = subject dlopen() address
-    modified_registers.rdi = subject_string_region; // RDI = pointer to shared library path string
+    modified_registers.rdi = subject_data_region; // RDI = pointer to shared library path string
     modified_registers.rsi = RTLD_LAZY; // RSI = RTLD_LAZY
     if (ptrace(PTRACE_SETREGS, pid, NULL, &modified_registers) == -1) {
         fprintf(stderr, "error: failed to PTRACE_SETREGS: %s\n", strerror(errno));
@@ -738,9 +900,18 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
         goto EXIT;
     }
 
+    // Free mmap'd region
+    if (!subject_inject_syscall2(subject, NULL, SYSCALL_MUNMAP, subject_mmap_region, 8192)) {
+        fprintf(stderr, "error: munmap syscall injection failed\n");
+        goto EXIT;
+    }
+
     success = true;
 
   EXIT:
+    if (so_file_contents != NULL) {
+        free(so_file_contents);
+    }
     subject_detach(subject);
     return success;
 }

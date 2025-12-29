@@ -1,3 +1,6 @@
+#ifndef _STRING_LIST_H
+#define _STRING_LIST_H
+
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -18,3 +21,5 @@ bool string_list_append(string_list_t *list, const char *string);
 void string_list_pop(string_list_t *list);
 void string_list_free(string_list_t *list);
 string_list_t *string_split(const char *string, const char *separator, bool keep_empty);
+
+#endif

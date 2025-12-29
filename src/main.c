@@ -60,16 +60,6 @@ typedef union command_u {
 } command_u;
 
 
-static void ms_sleep(long milliseconds)
-{
-    struct timespec sleep_duration = {
-        .tv_sec = milliseconds / 1000,
-        .tv_nsec = (milliseconds % 1000) * 1000000,
-    };
-    nanosleep(&sleep_duration, &sleep_duration);
-}
-
-
 static void get_input_line(char *buffer, size_t buffer_size) {
     int c;
     size_t bytes_read = 0;

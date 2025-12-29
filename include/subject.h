@@ -70,9 +70,13 @@ subject_t *subject_create(pid_t pid);
 bool subject_attach(subject_t *subject);
 void subject_detach(subject_t *subject);
 void subject_free(subject_t *subject);
-
-bool subject_inject_syscall(subject_t *subject, uintptr_t *result,
-        int syscall, uintptr_t rdi, uintptr_t rsi, uintptr_t rdx, uintptr_t r10, uintptr_t r8, uintptr_t r9);
+bool subject_inject_syscall0(subject_t *subject, uintptr_t *result, int syscall);
+bool subject_inject_syscall1(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1);
+bool subject_inject_syscall2(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2);
+bool subject_inject_syscall3(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
+bool subject_inject_syscall4(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4);
+bool subject_inject_syscall5(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4, uintptr_t arg5);
+bool subject_inject_syscall6(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4, uintptr_t arg5, uintptr_t arg6);
 bool subject_inject_so(subject_t *subject, const char *so_path);
 
 scan_t *subject_begin_scan(subject_t *subject, scan_type_e type);
