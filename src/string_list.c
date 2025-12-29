@@ -4,6 +4,18 @@
 #include "string_list.h"
 
 
+bool str_contains(const char *haystack, const char *needle)
+{
+    return strstr(haystack, needle) != NULL;
+}
+
+
+bool streq(const char *a, const char *b)
+{
+    return strcmp(a, b) == 0;
+}
+
+
 string_list_t *string_list_new(void)
 {
     string_list_t *list = malloc(sizeof(string_list_t));

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE 1
 #define _POSIX_C_SOURCE 1
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -10,11 +11,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/ptrace.h>
+#include <sys/user.h>
 #include <sys/wait.h>
 
+#include "string_list.h"
 #include "subject.h"
+
+#define SYSCALL_MMAP    9
+#define PERM_READ       4
+#define PERM_WRITE      2
+#define PERM_EXEC       1
 
 
 typedef struct region
@@ -34,17 +43,96 @@ typedef struct maps {
 } maps_t;
 
 
-static int open_maps(pid_t pid) {
+static int maps_fd_open(pid_t pid) {
+    if (pid == 0) {
+        return open("/proc/self/maps", O_RDONLY);
+    }
     char maps_path[32] = {0};
     snprintf(maps_path, 31, "/proc/%d/maps", pid);
     return open(maps_path, O_RDONLY);
 }
 
 
-static int memory_open(pid_t pid) {
+static int memory_fd_open(pid_t pid) {
     char memory_path[32] = {0};
     snprintf(memory_path, 31, "/proc/%d/mem", pid);
     return open(memory_path, O_RDWR);
+}
+
+
+static bool memory_write(int fd, const void *buffer, uintptr_t addr, size_t length) {
+    if (lseek(fd, addr, SEEK_SET) == -1) {
+        fprintf(stderr, "error: failed to lseek() in memory file: %s\n", strerror(errno));
+        return false;
+    }
+    size_t bytes_written = 0;
+    while (bytes_written < length) {
+        ssize_t last_write = write(fd, buffer+bytes_written, length-bytes_written);
+        if (last_write <= 0) {
+            fprintf(stderr, "error: memory write failed: %s\n", strerror(errno));
+            return false;
+        }
+        bytes_written += (size_t)last_write;
+    }
+    return true;
+}
+
+
+static char *memory_read_string(int fd, uintptr_t addr) {
+    if (lseek(fd, addr, SEEK_SET) == -1) {
+        fprintf(stderr, "error: failed to lseek() in memory file: %s\n", strerror(errno));
+        return false;
+    }
+
+    size_t length = 0;
+    size_t capacity = 256;
+    char *result = malloc(capacity);
+    while (read(fd, result + length, 1) > 0) {
+        if (length == capacity - 1) {
+            capacity *= 2;
+            result = realloc(result, capacity);
+        }
+        if (result[length++] == '\0') {
+            break;
+        }
+    }
+    result[length] = '\0';
+    return result;
+}
+
+
+static bool memory_read(int fd, void *buffer, uintptr_t addr, size_t length) {
+    if (lseek(fd, addr, SEEK_SET) == -1) {
+        fprintf(stderr, "error: failed to lseek() in memory file: %s\n", strerror(errno));
+        return false;
+    }
+    size_t bytes_read = 0;
+    while (bytes_read < length) {
+        ssize_t last_read = read(fd, buffer+bytes_read, length-bytes_read);
+        if (last_read <= 0) {
+            fprintf(stderr, "error: memory read failed: %s\n", strerror(errno));
+            return false;
+        }
+        bytes_read += (size_t)last_read;
+    }
+    return true;
+}
+
+
+static void memory_debug_print(int fd, uintptr_t addr, size_t length) {
+    uint8_t *buffer = malloc(length);
+    if (memory_read(fd, buffer, addr, length)) {
+        printf("DBG (%p): ", (void*)addr);
+        for (size_t i=0; i < length; i++) {
+            printf("%02x", buffer[i]);
+            if (i < length - 1) {
+                printf(" ");
+            }
+        }
+        printf("\n");
+    } else {
+        printf("DBG: could not read subject memory at %p\n", (void*)addr);
+    }
 }
 
 
@@ -85,7 +173,7 @@ static maps_t *read_maps(pid_t pid) {
     size_t region_capacity = 32;
     maps->regions = malloc(region_capacity * sizeof(region_t));
 
-    int fd = open_maps(pid);
+    int fd = maps_fd_open(pid);
     if (fd == -1) {
         fprintf(stderr, "error: failed to open /proc/<pid>/maps: %s\n", strerror(errno));
         free(maps);
@@ -122,6 +210,22 @@ static maps_t *read_maps(pid_t pid) {
 
     close(fd);
     return maps;
+}
+
+
+static region_t *find_region(maps_t *maps, const char *filename, int permissions) {
+    const char *current_filename = "";
+    for (size_t i=0; i < maps->region_count; i++) {
+        region_t *region = maps->regions + i;
+        if (strlen(region->filename) > 0) {
+            current_filename = region->filename;
+        }
+        int region_permissions = (region->read ? PERM_READ : 0)|(region->write ? PERM_WRITE : 0)|(region->exec ? PERM_EXEC : 0);
+        if (str_contains(current_filename, filename) && region_permissions == permissions) {
+            return region;
+        }
+    }
+    return NULL;
 }
 
 
@@ -186,7 +290,9 @@ static bool generic_compare(scan_type_e type, search_op_e op, const void *a, con
 }
 
 
-static bool memory_search(scan_t *scan, int fd, size_t offset, size_t size, void *needle, size_t needle_size, search_op_e op) {
+static bool memory_search(scan_t *scan, size_t offset, size_t size, void *needle, size_t needle_size, search_op_e op) {
+    int fd = scan->subject->memory_fd;
+
     if (lseek(fd, offset, SEEK_SET) == -1) {
         fprintf(stderr, "error: failed to lseek memory file: %s\n", strerror(errno));
         return false;
@@ -250,7 +356,9 @@ static bool memory_search(scan_t *scan, int fd, size_t offset, size_t size, void
 }
 
 
-static bool memory_filter(scan_t *scan, int fd, void *value, size_t value_size, search_op_e op) {
+static bool memory_filter(scan_t *scan, void *value, size_t value_size, search_op_e op) {
+    int fd = scan->subject->memory_fd;
+
     uint8_t buffer[sizeof(scan_value_u)];
     size_t old_hit_count = scan->hit_count;
     scan->hit_count = 0;
@@ -292,30 +400,349 @@ static void pop_scan(scan_t *scan) {
 }
 
 
-subject_t *subject_create(pid_t pid) {
-    subject_t *subject = calloc(1, sizeof(subject_t));
-    subject->pid = pid;
+static bool subject_continue_until_breakpoint(subject_t *subject) {
+    int status;
+
+    // Allow the subject to continue executing
+    if (ptrace(PTRACE_CONT, subject->pid, NULL, NULL) == -1) {
+        fprintf(stderr, "error: failed to PTRACE_CONT: %s\n", strerror(errno));
+        return false;
+    }
+
+    // Wait until our breakpoint is hit
+    if (waitpid(subject->pid, &status, 0) == -1) {
+        fprintf(stderr, "error: failed to waitpid: %s\n", strerror(errno));
+        return false;
+    }
+    if (!WIFSTOPPED(status)) {
+        fprintf(stderr, "error: failed to waitpid, subject did not stop\n");
+        return false;
+    }
+    if (WSTOPSIG(status) != SIGTRAP) {
+        fprintf(stderr, "error: subject did not hit SIGTRAP, hit signal %d instead\n", WSTOPSIG(status));
+        return false;
+    }
+
+    return true;
+}
+
+
+void subject_detach(subject_t *subject) {
+    if (subject->attached == 0) {
+        return;
+    } else if (subject->attached > 1) {
+        subject->attached--;
+    } else {
+        if (ptrace(PTRACE_DETACH, subject->pid, 0L, 0L) == -1) {
+            fprintf(stderr, "warning: failed to ptrace detach: %s\n", strerror(errno));
+        }
+
+        if (subject->memory_fd != -1) {
+            close(subject->memory_fd);
+            subject->memory_fd = -1;
+        }
+
+        subject->attached = 0;
+    }
+}
+
+
+bool subject_attach(subject_t *subject) {
+    pid_t pid = subject->pid;
+
+    if (subject->attached > 0) {
+        subject->attached++;
+        return true;
+    }
 
     if (ptrace(PTRACE_ATTACH, pid, 0L, 0L) == -1) {
         fprintf(stderr, "error: failed to ptrace attach: %s\n", strerror(errno));
-        subject_free(subject);
-        return NULL;
+        return false;
     }
+    subject->attached = 1;
 
     int status;
     if (waitpid(pid, &status, 0) == -1) {
         fprintf(stderr, "error: failed to waitpid: %s\n", strerror(errno));
-        subject_free(subject);
-        subject = NULL;
+        subject_detach(subject);
+        return false;
     }
 
-    if (ptrace(PTRACE_DETACH, pid, 0L, 0L) == -1) {
-        fprintf(stderr, "error: failed to ptrace detach: %s\n", strerror(errno));
+    subject->memory_fd = memory_fd_open(pid);
+    if (subject->memory_fd == -1) {
+        fprintf(stderr, "error: failed to open memory fd: %s\n", strerror(errno));
+        subject_detach(subject);
+        return false;
+    }
+
+    return true;
+}
+
+
+subject_t *subject_create(pid_t pid) {
+    subject_t *subject = calloc(1, sizeof(subject_t));
+    if (subject == NULL) {
+        return NULL;
+    }
+
+    subject->pid = pid;
+    subject->attached = 0;
+    subject->memory_fd = -1;
+
+    if (!subject_attach(subject)) {
         subject_free(subject);
         return NULL;
     }
 
     return subject;
+}
+
+
+bool subject_inject_syscall(subject_t *subject, uintptr_t *result,
+        int syscall, uintptr_t rdi, uintptr_t rsi, uintptr_t rdx, uintptr_t r10, uintptr_t r8, uintptr_t r9)
+{
+    bool success = false;
+    pid_t pid = subject->pid;
+    int memory_fd = subject->memory_fd;
+    int status;
+
+    uint8_t injected_code[] = {
+        0x90,       // nop
+        0x90,       // nop
+        0x0f, 0x05, // syscall
+        0xcc,       // int 3
+    };
+    uint8_t backup_code[sizeof(injected_code)];
+
+    if (!subject_attach(subject)) {
+        fprintf(stderr, "error: failed to subject attach\n");
+        return false;
+    }
+
+    struct user_regs_struct starting_registers;
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &starting_registers) == -1) {
+        fprintf(stderr, "error: failed to ptrace GETREGS: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    // Save the code currently under RIP
+    if (!memory_read(memory_fd, backup_code, starting_registers.rip, sizeof(backup_code))) {
+        goto EXIT;
+    }
+
+    // Write new code to RIP
+    if (!memory_write(memory_fd, injected_code, starting_registers.rip, sizeof(injected_code))) {
+        goto EXIT;
+    }
+
+    // Set registers up for syscall
+    struct user_regs_struct registers;
+    memcpy(&registers, &starting_registers, sizeof(struct user_regs_struct));
+    registers.rip += 2;
+    registers.rax = (unsigned long long)syscall;
+    registers.rdi = rdi;
+    registers.rsi = rsi;
+    registers.rdx = rdx;
+    registers.r10 = r10;
+    registers.r8 = r8;
+    registers.r9 = r9;
+    if (ptrace(PTRACE_SETREGS, pid, NULL, &registers) == -1) {
+        fprintf(stderr, "error: failed to ptrace SETREGS: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    // Allow the subject to continue executing
+    if (ptrace(PTRACE_CONT, pid, NULL, NULL) == -1) {
+        fprintf(stderr, "error: failed to PTRACE_CONT: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    // Wait until our breakpoint is hit
+    if (waitpid(pid, &status, 0) == -1) {
+        fprintf(stderr, "error: failed to waitpid: %s\n", strerror(errno));
+        goto EXIT;
+    }
+    if (!WIFSTOPPED(status)) {
+        fprintf(stderr, "error: subject did not stop\n");
+        goto EXIT;
+    }
+    if (WSTOPSIG(status) != SIGTRAP) {
+        fprintf(stderr, "error: subject did not hit SIGTRAP, hit %d instead\n", WSTOPSIG(status));
+        goto EXIT;
+    }
+
+    // Retrieve result
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &registers) == -1) {
+        fprintf(stderr, "error: failed to ptrace GETREGS: %s\n", strerror(errno));
+        goto EXIT;
+    }
+    *result = registers.rax;
+
+    // Restore backup code to RIP
+    if (!memory_write(memory_fd, backup_code, starting_registers.rip, sizeof(backup_code))) {
+        goto EXIT;
+    }
+
+    // Restore original registers
+    if (ptrace(PTRACE_SETREGS, pid, NULL, &starting_registers) == -1) {
+        fprintf(stderr, "error: failed to ptrace SETREGS: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    success = true;
+
+  EXIT:
+    subject_detach(subject);
+    return success;
+}
+
+
+bool subject_inject_so(subject_t *subject, const char *so_path) {
+    bool success = false;
+    int status;
+    char so_path_buffer[256] = {0};
+    strncpy(so_path_buffer, so_path, 255);
+
+    if (!subject_attach(subject)) {
+        fprintf(stderr, "error: failed to subject attach\n");
+        return false;
+    }
+
+    pid_t pid = subject->pid;
+    int memory_fd = subject->memory_fd;
+
+    // Find our own offset from libc to dlopen and dlerror
+    maps_t *self_maps = read_maps(0);
+    region_t *self_libc_code_region = find_region(self_maps, "libc.so", PERM_READ|PERM_EXEC);
+    if (self_libc_code_region == NULL) {
+        fprintf(stderr, "error: failed to find libc.so in /proc/self/maps\n");
+        goto EXIT;
+    }
+    uintptr_t self_dlopen_address = (uintptr_t)dlsym(RTLD_DEFAULT, "dlopen");
+    uintptr_t self_dlerror_address = (uintptr_t)dlsym(RTLD_DEFAULT, "dlerror");
+    uintptr_t dlopen_offset = self_dlopen_address - self_libc_code_region->offset;
+    uintptr_t dlerror_offset = self_dlerror_address - self_libc_code_region->offset;
+    free_maps(self_maps);
+
+    // Find the subject's dlopen from their libc base
+    maps_t *subject_maps = read_maps(pid);
+    region_t *subject_libc_code_region = find_region(subject_maps, "libc.so", PERM_READ|PERM_EXEC);
+    if (subject_libc_code_region == NULL) {
+        fprintf(stderr, "error: failed to find libc.so in subject's /proc/<pid>/maps\n");
+        goto EXIT;
+    }
+    uintptr_t subject_dlopen_address = subject_libc_code_region->offset + dlopen_offset;
+    uintptr_t subject_dlerror_address = subject_libc_code_region->offset + dlerror_offset;
+    free_maps(subject_maps);
+
+    // Save subject's starting registers
+    struct user_regs_struct starting_registers;
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &starting_registers) == -1) {
+        fprintf(stderr, "error: failed to ptrace GETREGS: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    // Create mmap region
+    uintptr_t subject_mmap_region;
+    if (!subject_inject_syscall(subject, &subject_mmap_region, SYSCALL_MMAP, 0, 4096, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)) {
+        fprintf(stderr, "error: syscall injection failed\n");
+        goto EXIT;
+    }
+
+    if ((intptr_t)subject_mmap_region < 0) {
+        int err_code = (int)(-(intptr_t)subject_mmap_region);
+        fprintf(stderr, "error: subject mmap failed: %s\n", strerror(err_code));
+        goto EXIT;
+    }
+
+    uintptr_t subject_code_region = subject_mmap_region + 0;
+    uintptr_t subject_string_region = subject_code_region + 256;
+
+    // Write the so_path and the injected code to the subject mmap'd area
+    if (!memory_write(memory_fd, so_path_buffer, subject_string_region, sizeof(so_path_buffer))) {
+        goto EXIT;
+    }
+
+    uint8_t injected_code[] = {
+        0x90, // nop
+        0x90, // nop
+        0x90, // nop (replaced with push rbp sometimes)
+        0xff, 0xd0, // call rax
+        0xcc, // int 3
+    };
+
+    if ((starting_registers.rsp & 15) != 0) {
+        injected_code[2] = 0x55; // push rbp
+    }
+
+    if (!memory_write(memory_fd, injected_code, subject_code_region, sizeof(injected_code))) {
+        goto EXIT;
+    }
+
+    // Set up the registers for the injected code
+    struct user_regs_struct modified_registers;
+    memcpy(&modified_registers, &starting_registers, sizeof(struct user_regs_struct));
+    modified_registers.rip = subject_code_region + 2; // Two NOPs were added, in case the kernel subtracts 2 from RIP
+    modified_registers.rax = subject_dlopen_address; // RAX = subject dlopen() address
+    modified_registers.rdi = subject_string_region; // RDI = pointer to shared library path string
+    modified_registers.rsi = RTLD_LAZY; // RSI = RTLD_LAZY
+    if (ptrace(PTRACE_SETREGS, pid, NULL, &modified_registers) == -1) {
+        fprintf(stderr, "error: failed to PTRACE_SETREGS: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    // Let the injected code run
+    if (!subject_continue_until_breakpoint(subject)) {
+        fprintf(stderr, "error: failed on injected dlopen()\n");
+        goto EXIT;
+    }
+
+    // Get register state after running dlopen()
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &modified_registers) == -1) {
+        fprintf(stderr, "error: failed to PTRACE_GETREGS: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    // Check if dlopen() failed and returned NULL
+    if (modified_registers.rax == 0) {
+        // Setup to run dlerror
+        memcpy(&modified_registers, &starting_registers, sizeof(struct user_regs_struct));
+        modified_registers.rip = subject_code_region + 2; // Two NOPs were added, in case the kernel subtracts 2 from RIP
+        modified_registers.rax = subject_dlerror_address; // RAX = subject dlerror() address
+        if (ptrace(PTRACE_SETREGS, pid, NULL, &modified_registers) == -1) {
+            fprintf(stderr, "error: failed to PTRACE_SETREGS: %s\n", strerror(errno));
+            goto EXIT;
+        }
+
+        // Let the injected code run
+        if (!subject_continue_until_breakpoint(subject)) {
+            fprintf(stderr, "error: failed on injected dlopen()\n");
+            goto EXIT;
+        }
+
+        // Get register state after running dlerror()
+        if (ptrace(PTRACE_GETREGS, pid, NULL, &modified_registers) == -1) {
+            fprintf(stderr, "error: failed to PTRACE_GETREGS: %s\n", strerror(errno));
+            goto EXIT;
+        }
+
+        char *error_string = memory_read_string(memory_fd, modified_registers.rax);
+        fprintf(stderr, "error: subject dlopen() failed: %s\n", error_string);
+        free(error_string);
+        goto EXIT;
+    }
+
+    // Restore starting registers
+    if (ptrace(PTRACE_SETREGS, pid, NULL, &starting_registers) == -1) {
+        fprintf(stderr, "error: failed to PTRACE_SETREGS: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    success = true;
+
+  EXIT:
+    subject_detach(subject);
+    return success;
 }
 
 
@@ -340,6 +767,10 @@ void subject_free(subject_t *subject) {
     if (subject == NULL) {
         return;
     }
+    if (subject->attached > 0) {
+        subject->attached = 1;
+    }
+    subject_detach(subject);
     while (subject->scans != NULL) {
         scan_free(subject->scans);
     }
@@ -376,47 +807,23 @@ scan_t *scan_fork(scan_t *scan) {
 
 
 bool scan_refresh(scan_t *scan) {
-    int memory_fd = -1;
     bool success = false;
-    bool attached = false;
     subject_t *subject = scan->subject;
     pid_t pid = subject->pid;
 
-    if (ptrace(PTRACE_ATTACH, pid, 0L, 0L) == -1) {
-        fprintf(stderr, "error: failed to ptrace attach: %s\n", strerror(errno));
-        goto EXIT;
-    }
-    attached = true;
-
-    int status;
-    if (waitpid(pid, &status, 0) == -1) {
-        fprintf(stderr, "error: failed to waitpid: %s\n", strerror(errno));
-        goto EXIT;
+    if (!subject_attach(subject)) {
+        fprintf(stderr, "error: failed to subject attach\n");
+        return false;
     }
 
-    memory_fd = memory_open(pid);
-    if (memory_fd == -1) {
-        fprintf(stderr, "error: failed to open /proc/<pid>/mem: %s\n", strerror(errno));
-        goto EXIT;
-    }
-
-    if (!memory_filter(scan, memory_fd, NULL, scan_type_size(scan->type), SEARCH_NOOP)) {
+    if (!memory_filter(scan, NULL, scan_type_size(scan->type), SEARCH_NOOP)) {
         goto EXIT;
     }
 
     success = true;
 
   EXIT:
-    if (attached) {
-        if (ptrace(PTRACE_DETACH, pid, 0L, 0L) == -1) {
-            fprintf(stderr, "error: failed to ptrace detach: %s\n", strerror(errno));
-            return false;
-        }
-    }
-    if (memory_fd != -1) {
-        close(memory_fd);
-    }
-
+    subject_detach(subject);
     return success;
 }
 
@@ -436,7 +843,6 @@ void scan_eliminate(scan_t *scan, size_t index) {
 bool scan_update(scan_t *scan, search_op_e op, ...) {
     int memory_fd = -1;
     bool success = false;
-    bool attached = false;
     subject_t *subject = scan->subject;
     pid_t pid = subject->pid;
 
@@ -460,22 +866,9 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
 
     va_end(args);
 
-    if (ptrace(PTRACE_ATTACH, pid, 0L, 0L) == -1) {
-        fprintf(stderr, "error: failed to ptrace attach: %s\n", strerror(errno));
-        goto EXIT;
-    }
-    attached = true;
-
-    int status;
-    if (waitpid(pid, &status, 0) == -1) {
-        fprintf(stderr, "error: failed to waitpid: %s\n", strerror(errno));
-        goto EXIT;
-    }
-
-    memory_fd = memory_open(pid);
-    if (memory_fd == -1) {
-        fprintf(stderr, "error: failed to open /proc/<pid>/mem: %s\n", strerror(errno));
-        goto EXIT;
+    if (!subject_attach(subject)) {
+        fprintf(stderr, "error: failed to subject attach\n");
+        return false;
     }
 
     if (scan->hits == NULL) {
@@ -497,7 +890,7 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
             if (!region->read || !region->write) {
                 continue;
             }
-            if (!memory_search(scan, memory_fd, region->offset, region->size, &value, scan_type_size(scan->type), op)) {
+            if (!memory_search(scan, region->offset, region->size, &value, scan_type_size(scan->type), op)) {
                 free_maps(maps);
                 goto EXIT;
             }
@@ -505,7 +898,7 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
 
         free_maps(maps);
     } else {
-        if (!memory_filter(scan, memory_fd, &value, scan_type_size(scan->type), op)) {
+        if (!memory_filter(scan, &value, scan_type_size(scan->type), op)) {
             goto EXIT;
         }
     }
@@ -513,26 +906,16 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
     success = true;
 
   EXIT:
-    if (attached) {
-        if (ptrace(PTRACE_DETACH, pid, 0L, 0L) == -1) {
-            fprintf(stderr, "error: failed to ptrace detach: %s\n", strerror(errno));
-            return false;
-        }
-    }
-    if (memory_fd != -1) {
-        close(memory_fd);
-    }
-
+    subject_detach(subject);
     return success;
 }
 
 
 bool scan_set_value(scan_t *scan, ...) {
-    int memory_fd = -1;
     bool success = false;
-    bool attached = false;
     subject_t *subject = scan->subject;
     pid_t pid = subject->pid;
+    int memory_fd = subject->memory_fd;
 
     scan_value_u value;
     va_list args;
@@ -554,22 +937,9 @@ bool scan_set_value(scan_t *scan, ...) {
 
     va_end(args);
 
-    if (ptrace(PTRACE_ATTACH, pid, 0L, 0L) == -1) {
-        fprintf(stderr, "error: failed to ptrace attach: %s\n", strerror(errno));
-        goto EXIT;
-    }
-    attached = true;
-
-    int status;
-    if (waitpid(pid, &status, 0) == -1) {
-        fprintf(stderr, "error: failed to waitpid: %s\n", strerror(errno));
-        goto EXIT;
-    }
-
-    memory_fd = memory_open(pid);
-    if (memory_fd == -1) {
-        fprintf(stderr, "error: failed to open /proc/<pid>/mem: %s\n", strerror(errno));
-        goto EXIT;
+    if (!subject_attach(subject)) {
+        fprintf(stderr, "error: failed to subject attach\n");
+        return false;
     }
 
     size_t value_size = scan_type_size(scan->type);
@@ -582,16 +952,7 @@ bool scan_set_value(scan_t *scan, ...) {
     success = true;
 
   EXIT:
-    if (attached) {
-        if (ptrace(PTRACE_DETACH, pid, 0L, 0L) == -1) {
-            fprintf(stderr, "error: failed to ptrace detach: %s\n", strerror(errno));
-            return false;
-        }
-    }
-    if (memory_fd != -1) {
-        close(memory_fd);
-    }
-
+    subject_detach(subject);
     return success;
 }
 

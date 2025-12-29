@@ -1,4 +1,7 @@
+#define _XOPEN_SOURCE 500
 #define _POSIX_C_SOURCE 199309L
+#include <errno.h>
+#include <libgen.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +21,7 @@ typedef enum command_type_e {
     CMD_REFRESH,
     CMD_ELIMINATE,
     CMD_QUIT,
+    CMD_INJECT_SO,
 } command_type_e;
 
 typedef struct command_eliminate_t {
@@ -66,11 +70,6 @@ static void ms_sleep(long milliseconds)
 }
 
 
-static bool streq(const char *a, const char *b) {
-    return strcmp(a, b) == 0;
-}
-
-
 static void get_input_line(char *buffer, size_t buffer_size) {
     int c;
     size_t bytes_read = 0;
@@ -105,6 +104,11 @@ static void get_command(command_u *command) {
         if (*end == '\0') {
             command->type = CMD_FIND_APPROXIMATE;
             command->approximate.value = plain_value;
+            break;
+        }
+
+        if (streq(cmd, "inject")) {
+            command->type = CMD_INJECT_SO;
             break;
         }
 
@@ -203,6 +207,7 @@ static void get_command(command_u *command) {
 
 
 int main(int argc, char **argv) {
+    // Handle cmd line arguments
     if (argc != 2 && argc != 3) {
         fprintf(stderr, "usage: %s <pid> [all|float|f32|f64]\n", argv[0]);
         return 1;
@@ -219,12 +224,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "error: pid %lu out of range (%d-%d)\n", pid_arg, 1, INT_MAX);
         return 1;
     }
-    pid_t pid = (pid_t)pid_arg;
-    subject_t *subject = subject_create(pid);
-    if (subject == NULL) {
-        fprintf(stderr, "error: failed to attach to pid %d\n", pid);
-        return 1;
-    }
 
     const char *mode;
     if (argc == 2) {
@@ -233,6 +232,15 @@ int main(int argc, char **argv) {
         mode = argv[2];
     }
 
+    // Create subject and inject shared object
+    pid_t pid = (pid_t)pid_arg;
+    subject_t *subject = subject_create(pid);
+    if (subject == NULL) {
+        fprintf(stderr, "error: failed to attach to pid %d\n", pid);
+        return 1;
+    }
+
+    // Start scans
     scan_t *float32_scan = NULL;
     scan_t *float64_scan = NULL;
     size_t scan_count = 0;
@@ -258,34 +266,52 @@ int main(int argc, char **argv) {
         printf("%zu scans created\n", scan_count);
     }
 
+    // Handle commands
     while (true) {
+        subject_detach(subject);
         command_u command;
         get_command(&command);
+        subject_attach(subject);
 
         if (command.type == CMD_QUIT) {
             break;
         }
 
+        else if (command.type == CMD_INJECT_SO) {
+            // Find injectable shared object path
+            char exe_path[256] = {0};
+            if (readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1) == -1) {
+                fprintf(stderr, "error: failed to call readlink(\"/proc/self/exe\"): %s\n", strerror(errno));
+                return 1;
+            }
+
+            char *exe_dir = dirname(exe_path);
+            char so_path[256] = {0};
+            strcat(so_path, exe_dir);
+            strcat(so_path, "/inject.so");
+
+            if (!subject_inject_so(subject, so_path)) {
+                fprintf(stderr, "error: failed to inject shared object\n");
+                return 1;
+            }
+        }
+
         else if (command.type == CMD_FIND_BOUNDED) {
             if (float32_scan) {
-                ms_sleep(100);
                 if (!scan_update(float32_scan, SEARCH_GREATER, (float)command.bounded.min_value)) {
                     printf("error: failed to float32 SEARCH_GREATER\n");
                     break;
                 }
-                ms_sleep(100);
                 if (!scan_update(float32_scan, SEARCH_LESS, (float)command.bounded.max_value)) {
                     printf("error: failed to float32 SEARCH_LESS\n");
                     break;
                 }
             }
             if (float64_scan) {
-                ms_sleep(100);
                 if (!scan_update(float64_scan, SEARCH_GREATER, command.bounded.min_value)) {
                     printf("error: failed to float64 SEARCH_GREATER\n");
                     break;
                 }
-                ms_sleep(100);
                 if (!scan_update(float64_scan, SEARCH_LESS, command.bounded.max_value)) {
                     printf("error: failed to float64 SEARCH_LESS\n");
                     break;
@@ -295,14 +321,12 @@ int main(int argc, char **argv) {
 
         else if (command.type == CMD_FIND_EXACT) {
             if (float32_scan) {
-                ms_sleep(100);
                 if (!scan_update(float32_scan, SEARCH_EQUAL, (float)command.exact.value)) {
                     printf("error: failed to float32 SEARCH_EQUAL\n");
                     break;
                 }
             }
             if (float64_scan) {
-                ms_sleep(100);
                 if (!scan_update(float64_scan, SEARCH_EQUAL, command.exact.value)) {
                     printf("error: failed to float64 SEARCH_EQUAL\n");
                     break;
@@ -312,14 +336,12 @@ int main(int argc, char **argv) {
 
         else if (command.type == CMD_FIND_APPROXIMATE) {
             if (float32_scan) {
-                ms_sleep(100);
                 if (!scan_update(float32_scan, SEARCH_APPROX, (float)command.exact.value)) {
                     printf("error: failed to float32 SEARCH_EQUAL\n");
                     break;
                 }
             }
             if (float64_scan) {
-                ms_sleep(100);
                 if (!scan_update(float64_scan, SEARCH_APPROX, command.exact.value)) {
                     printf("error: failed to float64 SEARCH_EQUAL\n");
                     break;
@@ -329,14 +351,12 @@ int main(int argc, char **argv) {
 
         else if (command.type == CMD_SET_VALUE) {
             if (float32_scan) {
-                ms_sleep(100);
                 if (!scan_set_value(float32_scan, (float)command.set.value)) {
                     printf("error: failed to float32 SET_VALUE\n");
                     break;
                 }
             }
             if (float64_scan) {
-                ms_sleep(100);
                 if (!scan_set_value(float64_scan, command.set.value)) {
                     printf("error: failed to float64 SET_VALUE\n");
                     break;
@@ -346,11 +366,9 @@ int main(int argc, char **argv) {
 
         else if (command.type == CMD_REFRESH) {
             if (float32_scan) {
-                ms_sleep(100);
                 scan_refresh(float32_scan);
             }
             if (float64_scan) {
-                ms_sleep(100);
                 scan_refresh(float64_scan);
             }
         }

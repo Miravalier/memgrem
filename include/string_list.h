@@ -9,6 +9,9 @@ typedef struct string_list_t {
 } string_list_t;
 
 
+bool streq(const char *a, const char *b);
+bool str_contains(const char *haystack, const char *needle);
+
 string_list_t *string_list_new(void);
 bool string_list_append_n(string_list_t *list, const char *string, size_t string_length);
 bool string_list_append(string_list_t *list, const char *string);

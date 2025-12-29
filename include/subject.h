@@ -40,6 +40,8 @@ typedef struct subject {
     pid_t pid;
     pthread_t thread_id;
     struct scan *scans;
+    int attached;
+    int memory_fd;
 } subject_t;
 
 
@@ -65,9 +67,15 @@ typedef enum search_op_e {
 
 
 subject_t *subject_create(pid_t pid);
-scan_t *subject_begin_scan(subject_t *subject, scan_type_e type);
+bool subject_attach(subject_t *subject);
+void subject_detach(subject_t *subject);
 void subject_free(subject_t *subject);
 
+bool subject_inject_syscall(subject_t *subject, uintptr_t *result,
+        int syscall, uintptr_t rdi, uintptr_t rsi, uintptr_t rdx, uintptr_t r10, uintptr_t r8, uintptr_t r9);
+bool subject_inject_so(subject_t *subject, const char *so_path);
+
+scan_t *subject_begin_scan(subject_t *subject, scan_type_e type);
 scan_t *scan_fork(scan_t *scan);
 bool scan_set_value(scan_t *scan, ...);
 bool scan_update(scan_t *scan, search_op_e op, ...);
@@ -75,7 +83,6 @@ void scan_eliminate(scan_t *scan, size_t index);
 bool scan_refresh(scan_t *scan);
 void scan_print(scan_t *scan);
 void scan_free(scan_t *scan);
-
 size_t scan_type_size(scan_type_e type);
 
 
