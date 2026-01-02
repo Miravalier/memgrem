@@ -7,33 +7,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-
-typedef enum scan_type {
-    SCANTYPE_UINT8,
-    SCANTYPE_UINT16,
-    SCANTYPE_UINT32,
-    SCANTYPE_UINT64,
-    SCANTYPE_INT8,
-    SCANTYPE_INT16,
-    SCANTYPE_INT32,
-    SCANTYPE_INT64,
-    SCANTYPE_FLOAT32,
-    SCANTYPE_FLOAT64,
-} scan_type_e;
-
-
-typedef union scan_value {
-    uint8_t uint8;
-    uint16_t uint16;
-    uint32_t uint32;
-    uint64_t uint64;
-    int8_t int8;
-    int16_t int16;
-    int32_t int32;
-    int64_t int64;
-    float float32;
-    double float64;
-} scan_value_u;
+#include "inject_control.h"
+#include "gval.h"
 
 
 typedef struct subject {
@@ -42,28 +17,20 @@ typedef struct subject {
     struct scan *scans;
     int attached;
     int memory_fd;
+    uintptr_t control_buffer_address;
 } subject_t;
 
 
 typedef struct scan {
     struct subject *subject;
-    scan_type_e type;
+    gval_type_e type;
     size_t *hits;
     size_t hit_count;
     size_t hit_capacity;
-    scan_value_u values[32];
+    gval_u values[32];
     struct scan *next;
     struct scan *prev;
 } scan_t;
-
-
-typedef enum search_op_e {
-    SEARCH_NOOP,
-    SEARCH_EQUAL,
-    SEARCH_LESS,
-    SEARCH_GREATER,
-    SEARCH_APPROX,
-} search_op_e;
 
 
 subject_t *subject_create(pid_t pid);
@@ -78,8 +45,13 @@ bool subject_inject_syscall4(subject_t *subject, uintptr_t *result, int syscall,
 bool subject_inject_syscall5(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4, uintptr_t arg5);
 bool subject_inject_syscall6(subject_t *subject, uintptr_t *result, int syscall, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4, uintptr_t arg5, uintptr_t arg6);
 bool subject_inject_so(subject_t *subject, const char *so_path);
+bool subject_inject_worker(subject_t *subject);
 
-scan_t *subject_begin_scan(subject_t *subject, scan_type_e type);
+bool subject_command_sw_lock(subject_t *subject, lock_t *lock);
+bool subject_command_sw_unlock(subject_t *subject, uintptr_t addr);
+bool subject_command_print(subject_t *subject, const char *message);
+
+scan_t *subject_begin_scan(subject_t *subject, gval_type_e type);
 scan_t *scan_fork(scan_t *scan);
 bool scan_set_value(scan_t *scan, ...);
 bool scan_update(scan_t *scan, search_op_e op, ...);
@@ -87,7 +59,8 @@ void scan_eliminate(scan_t *scan, size_t index);
 bool scan_refresh(scan_t *scan);
 void scan_print(scan_t *scan);
 void scan_free(scan_t *scan);
-size_t scan_type_size(scan_type_e type);
+void scan_reset(scan_t *scan);
+size_t scan_value_size(scan_t *scan);
 
 
 #endif

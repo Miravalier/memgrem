@@ -1,5 +1,7 @@
 #include <time.h>
 
+#include "utils.h"
+
 void ms_sleep(long milliseconds)
 {
     struct timespec sleep_duration = {

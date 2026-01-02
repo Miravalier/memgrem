@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libgen.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -17,8 +18,10 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 
+#include "inject_control.h"
 #include "string_list.h"
 #include "subject.h"
+#include "utils.h"
 
 
 #define SYSCALL_READ    0
@@ -321,51 +324,9 @@ static void free_maps(maps_t *maps) {
 }
 
 
-static void generic_retrieve(scan_type_e type, void *dst, const void *src) {
-    if (type == SCANTYPE_FLOAT32) {
-        *(float*)dst = *(float*)src;
-    } else if (type == SCANTYPE_FLOAT64) {
-        *(double*)dst = *(double*)src;
-    }
-}
-
-
-static bool generic_compare(scan_type_e type, search_op_e op, const void *a, const void *b) {
-    if (op == SEARCH_NOOP) {
-        return true;
-    }
-
-    if (type == SCANTYPE_FLOAT32) {
-        if (op == SEARCH_EQUAL) {
-            return *(float*)a == *(float*)b;
-        } else if (op == SEARCH_GREATER) {
-            return *(float*)a >= *(float*)b;
-        } else if (op == SEARCH_LESS) {
-            return *(float*)a <= *(float*)b;
-        } else if (op == SEARCH_APPROX) {
-            float a_value = *(float*)a;
-            float b_value = *(float*)b;
-            return (a_value >= b_value - 1.5f) && (a_value <= b_value + 1.5f);
-        }
-    } else if (type == SCANTYPE_FLOAT64) {
-        if (op == SEARCH_EQUAL) {
-            return *(double*)a == *(double*)b;
-        } else if (op == SEARCH_GREATER) {
-            return *(double*)a >= *(double*)b;
-        } else if (op == SEARCH_LESS) {
-            return *(double*)a <= *(double*)b;
-        } else if (op == SEARCH_APPROX) {
-            double a_value = *(double*)a;
-            double b_value = *(double*)b;
-            return (a_value >= b_value - 1.5) && (a_value <= b_value + 1.5);
-        }
-    }
-    return false;
-}
-
-
-static bool memory_search(scan_t *scan, size_t offset, size_t size, void *needle, size_t needle_size, search_op_e op) {
+static bool memory_search(scan_t *scan, size_t offset, size_t size, gval_u *value, search_op_e op) {
     int fd = scan->subject->memory_fd;
+    size_t value_size = scan_value_size(scan);
 
     if (lseek(fd, offset, SEEK_SET) == -1) {
         fprintf(stderr, "error: failed to lseek memory file: %s\n", strerror(errno));
@@ -390,9 +351,9 @@ static bool memory_search(scan_t *scan, size_t offset, size_t size, void *needle
         uint8_t *match;
 
         if (op == SEARCH_EQUAL) {
-            while ((match = memmem(cursor, cursor_size, needle, needle_size))) {
+            while ((match = memmem(cursor, cursor_size, value, value_size))) {
                 if (scan->hit_count < 32) {
-                    generic_retrieve(scan->type, scan->values + scan->hit_count, match);
+                    gval_move(scan->type, scan->values + scan->hit_count, match);
                 }
                 if (scan->hit_count == scan->hit_capacity) {
                     scan->hit_capacity *= 2;
@@ -402,14 +363,14 @@ static bool memory_search(scan_t *scan, size_t offset, size_t size, void *needle
                     }
                 }
                 scan->hits[scan->hit_count++] = offset + (match - buffer);
-                cursor_size -= ((match + needle_size) - cursor);
-                cursor = match + needle_size;
+                cursor_size -= ((match + value_size) - cursor);
+                cursor = match + value_size;
             }
         } else {
-            for (size_t i=0; i + needle_size < cursor_size; i += needle_size) {
-                if (generic_compare(scan->type, op, cursor + i, needle)) {
+            for (size_t i=0; i + value_size < cursor_size; i += value_size) {
+                if (gval_compare(scan->type, op, cursor + i, value)) {
                     if (scan->hit_count < 32) {
-                        generic_retrieve(scan->type, scan->values + scan->hit_count, cursor + i);
+                        gval_move(scan->type, scan->values + scan->hit_count, cursor + i);
                     }
                     if (scan->hit_count == scan->hit_capacity) {
                         scan->hit_capacity *= 2;
@@ -430,19 +391,20 @@ static bool memory_search(scan_t *scan, size_t offset, size_t size, void *needle
 }
 
 
-static bool memory_filter(scan_t *scan, void *value, size_t value_size, search_op_e op) {
+static bool memory_filter(scan_t *scan, gval_u *value, search_op_e op) {
     int fd = scan->subject->memory_fd;
+    size_t value_size = scan_value_size(scan);
 
-    uint8_t buffer[sizeof(scan_value_u)];
+    uint8_t buffer[sizeof(gval_u)];
     size_t old_hit_count = scan->hit_count;
     scan->hit_count = 0;
     for (size_t i=0; i < old_hit_count; i++) {
         size_t hit_location = scan->hits[i];
         lseek(fd, hit_location, SEEK_SET);
         read(fd, buffer, value_size);
-        if (generic_compare(scan->type, op, buffer, value)) {
+        if (gval_compare(scan->type, op, buffer, value)) {
             if (scan->hit_count < 32) {
-                generic_retrieve(scan->type, scan->values + scan->hit_count, buffer);
+                gval_move(scan->type, scan->values + scan->hit_count, buffer);
             }
             scan->hits[scan->hit_count++] = hit_location;
         }
@@ -572,6 +534,68 @@ subject_t *subject_create(pid_t pid) {
 }
 
 
+static bool subject_issue_command(subject_t *subject, control_buffer_t *control_buffer) {
+    bool success = false;
+    control_buffer->inbound = 1;
+    control_buffer->magic_a = INJECT_MAGIC_A;
+    control_buffer->magic_b = INJECT_MAGIC_B;
+
+    if (!subject_attach(subject)) {
+        fprintf(stderr, "error: failed to attach to subject\n");
+        return false;
+    }
+
+    if (!memory_write(subject->memory_fd, control_buffer, subject->control_buffer_address, sizeof(control_buffer_t))) {
+        goto EXIT;
+    }
+
+    if (ptrace(PTRACE_DETACH, subject->pid, 0L, 0L) == -1) {
+        fprintf(stderr, "warning: failed to ptrace detach: %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    // Wait up to 5 seconds for the worker to finish the request
+    for (size_t i=0; i < 50; i++) {
+        ms_sleep(100);
+        if (ptrace(PTRACE_ATTACH, subject->pid, 0L, 0L) == -1) {
+            fprintf(stderr, "error: failed to ptrace attach: %s\n", strerror(errno));
+            goto EXIT;
+        }
+
+        int status;
+        if (waitpid(subject->pid, &status, 0) == -1) {
+            fprintf(stderr, "error: failed to waitpid: %s\n", strerror(errno));
+            goto EXIT;
+        }
+
+        if (!memory_read(subject->memory_fd, control_buffer, subject->control_buffer_address, sizeof(control_buffer_t))) {
+            goto EXIT;
+        }
+
+        if (control_buffer->outbound) {
+            break;
+        }
+
+        if (ptrace(PTRACE_DETACH, subject->pid, 0L, 0L) == -1) {
+            fprintf(stderr, "error: failed to ptrace detach: %s\n", strerror(errno));
+            goto EXIT;
+        }
+    }
+
+    if (!control_buffer->outbound) {
+        fprintf(stderr, "error: worker request timed out, worker may be dead\n");
+        goto EXIT;
+
+    }
+
+    success = true;
+
+  EXIT:
+    subject_detach(subject);
+    return success;
+}
+
+
 static bool subject_inject_syscall(subject_t *subject, uintptr_t *result,
         int syscall, uintptr_t rdi, uintptr_t rsi, uintptr_t rdx, uintptr_t r10, uintptr_t r8, uintptr_t r9)
 {
@@ -589,7 +613,7 @@ static bool subject_inject_syscall(subject_t *subject, uintptr_t *result,
     uint8_t backup_code[sizeof(injected_code)];
 
     if (!subject_attach(subject)) {
-        fprintf(stderr, "error: failed to subject attach\n");
+        fprintf(stderr, "error: failed to attach to subject\n");
         return false;
     }
 
@@ -709,6 +733,103 @@ bool subject_inject_syscall6(subject_t *subject, uintptr_t *result, int syscall,
 }
 
 
+bool subject_inject_worker(subject_t *subject) {
+    bool success = false;
+    unsigned long magic_bytes[] = {
+        INJECT_MAGIC_A,
+        INJECT_MAGIC_B,
+    };
+
+    if (!subject_attach(subject)) {
+        fprintf(stderr, "error: failed to attach to subject\n");
+        return false;
+    }
+
+    // Look for existing magic values from a previous injection
+    scan_t *magic_scan = subject_begin_scan(subject, TYPE_BYTES_16);
+    if (!scan_update(magic_scan, SEARCH_EQUAL, magic_bytes)) {
+        fprintf(stderr, "error: could not start scan before injecting shared object\n");
+        goto EXIT;
+    }
+
+    if (magic_scan->hit_count == 1) {
+        subject->control_buffer_address = (uintptr_t)magic_scan->hits[0];
+        success = true;
+        goto EXIT;
+    }
+
+    // Inject the worker shared object into the subject
+    char exe_path[256] = {0};
+    if (readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1) == -1) {
+        fprintf(stderr, "error: failed to call readlink(\"/proc/self/exe\"): %s\n", strerror(errno));
+        goto EXIT;
+    }
+
+    char *exe_dir = dirname(exe_path);
+    char so_path[256] = {0};
+    strcat(so_path, exe_dir);
+    strcat(so_path, "/inject.so");
+
+    if (!subject_inject_so(subject, so_path)) {
+        fprintf(stderr, "error: failed to inject shared object\n");
+        goto EXIT;
+    }
+
+    // Look for the magic values again after injecting
+    scan_reset(magic_scan);
+    if (!scan_update(magic_scan, SEARCH_EQUAL, magic_bytes)) {
+        fprintf(stderr, "error: could not start scan after injecting shared object\n");
+        goto EXIT;
+    }
+
+    if (magic_scan->hit_count != 1) {
+        fprintf(stderr, "error: could not find magic bytes after injecting shared object\n");
+        goto EXIT;
+    }
+
+    subject->control_buffer_address = (uintptr_t)magic_scan->hits[0];
+    success = true;
+
+  EXIT:
+    subject_detach(subject);
+    return success;
+}
+
+
+bool subject_command_sw_lock(subject_t *subject, lock_t *lock) {
+    control_buffer_t control_buffer = {
+        .request = CONTROL_REQUEST_SW_LOCK,
+    };
+    memcpy(&control_buffer.lock_arg, lock, sizeof(lock_t));
+    return subject_issue_command(subject, &control_buffer);
+}
+
+
+bool subject_command_sw_unlock(subject_t *subject, uintptr_t addr) {
+    control_buffer_t control_buffer = {
+        .request = CONTROL_REQUEST_SW_LOCK,
+        .lock_arg = {
+            .location = addr,
+        },
+    };
+    return subject_issue_command(subject, &control_buffer);
+}
+
+
+bool subject_command_print(subject_t *subject, const char *message) {
+    control_buffer_t control_buffer = {
+        .request = CONTROL_REQUEST_PRINT,
+    };
+
+    if (message != NULL) {
+        strncpy(control_buffer.string_arg, message, 255);
+        control_buffer.string_arg[255] = '\0';
+    }
+
+    return subject_issue_command(subject, &control_buffer);
+}
+
+
 bool subject_inject_so(subject_t *subject, const char *so_path) {
     bool success = false;
     uint8_t *so_file_contents = NULL;
@@ -717,7 +838,7 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
     uintptr_t result;
 
     if (!subject_attach(subject)) {
-        fprintf(stderr, "error: failed to subject attach\n");
+        fprintf(stderr, "error: failed to attach to subject\n");
         return false;
     }
 
@@ -917,7 +1038,7 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
 }
 
 
-scan_t *subject_begin_scan(subject_t *subject, scan_type_e type) {
+scan_t *subject_begin_scan(subject_t *subject, gval_type_e type) {
     if (subject == NULL) {
         return NULL;
     }
@@ -931,6 +1052,16 @@ scan_t *subject_begin_scan(subject_t *subject, scan_type_e type) {
 
     push_scan(scan);
     return scan;
+}
+
+
+void scan_reset(scan_t *scan) {
+    if (scan->hits != NULL) {
+        free(scan->hits);
+    }
+    scan->hits = NULL;
+    scan->hit_count = 0;
+    scan->hit_capacity = 0;
 }
 
 
@@ -949,21 +1080,8 @@ void subject_free(subject_t *subject) {
 }
 
 
-size_t scan_type_size(scan_type_e type) {
-    switch (type)
-    {
-        case SCANTYPE_UINT8: return sizeof(uint8_t);
-        case SCANTYPE_UINT16: return sizeof(uint16_t);
-        case SCANTYPE_UINT32: return sizeof(uint32_t);
-        case SCANTYPE_UINT64: return sizeof(uint64_t);
-        case SCANTYPE_INT8: return sizeof(int8_t);
-        case SCANTYPE_INT16: return sizeof(int16_t);
-        case SCANTYPE_INT32: return sizeof(int32_t);
-        case SCANTYPE_INT64: return sizeof(int64_t);
-        case SCANTYPE_FLOAT32: return sizeof(float);
-        case SCANTYPE_FLOAT64: return sizeof(double);
-    }
-    return 0;
+size_t scan_value_size(scan_t *scan) {
+    return gval_size(scan->type);
 }
 
 
@@ -983,11 +1101,11 @@ bool scan_refresh(scan_t *scan) {
     pid_t pid = subject->pid;
 
     if (!subject_attach(subject)) {
-        fprintf(stderr, "error: failed to subject attach\n");
+        fprintf(stderr, "error: failed to attach to subject\n");
         return false;
     }
 
-    if (!memory_filter(scan, NULL, scan_type_size(scan->type), SEARCH_NOOP)) {
+    if (!memory_filter(scan, NULL, SEARCH_NOOP)) {
         goto EXIT;
     }
 
@@ -1017,28 +1135,33 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
     subject_t *subject = scan->subject;
     pid_t pid = subject->pid;
 
-    scan_value_u value;
+    gval_u value;
     va_list args;
     va_start(args, op);
 
     switch (scan->type)
     {
-        case SCANTYPE_UINT8: value.uint8 = (uint8_t)va_arg(args, unsigned); break;
-        case SCANTYPE_UINT16: value.uint16 = (uint16_t)va_arg(args, unsigned); break;
-        case SCANTYPE_UINT32: value.uint32 = va_arg(args, uint32_t); break;
-        case SCANTYPE_UINT64: value.uint64 = va_arg(args, uint64_t); break;
-        case SCANTYPE_INT8: value.int8 = (int8_t)va_arg(args, int); break;
-        case SCANTYPE_INT16: value.int16 = (int16_t)va_arg(args, int); break;
-        case SCANTYPE_INT32: value.int32 = va_arg(args, int32_t); break;
-        case SCANTYPE_INT64: value.int64 = va_arg(args, int64_t); break;
-        case SCANTYPE_FLOAT32: value.float32 = (float)va_arg(args, double); break;
-        case SCANTYPE_FLOAT64: value.float64 = va_arg(args, double); break;
+        case TYPE_UINT8: value.uint8 = (uint8_t)va_arg(args, unsigned); break;
+        case TYPE_UINT16: value.uint16 = (uint16_t)va_arg(args, unsigned); break;
+        case TYPE_UINT32: value.uint32 = va_arg(args, uint32_t); break;
+        case TYPE_UINT64: value.uint64 = va_arg(args, uint64_t); break;
+        case TYPE_INT8: value.int8 = (int8_t)va_arg(args, int); break;
+        case TYPE_INT16: value.int16 = (int16_t)va_arg(args, int); break;
+        case TYPE_INT32: value.int32 = va_arg(args, int32_t); break;
+        case TYPE_INT64: value.int64 = va_arg(args, int64_t); break;
+        case TYPE_FLOAT32: value.float32 = (float)va_arg(args, double); break;
+        case TYPE_FLOAT64: value.float64 = va_arg(args, double); break;
+        case TYPE_BYTES_16: {
+            const uint8_t *buffer = va_arg(args, uint8_t *);
+            memcpy(value.b16, buffer, 16);
+            break;
+        };
     }
 
     va_end(args);
 
     if (!subject_attach(subject)) {
-        fprintf(stderr, "error: failed to subject attach\n");
+        fprintf(stderr, "error: failed to attach to subject\n");
         return false;
     }
 
@@ -1061,7 +1184,7 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
             if (!region->read || !region->write) {
                 continue;
             }
-            if (!memory_search(scan, region->offset, region->size, &value, scan_type_size(scan->type), op)) {
+            if (!memory_search(scan, region->offset, region->size, &value, op)) {
                 free_maps(maps);
                 goto EXIT;
             }
@@ -1069,7 +1192,7 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
 
         free_maps(maps);
     } else {
-        if (!memory_filter(scan, &value, scan_type_size(scan->type), op)) {
+        if (!memory_filter(scan, &value, op)) {
             goto EXIT;
         }
     }
@@ -1088,32 +1211,37 @@ bool scan_set_value(scan_t *scan, ...) {
     pid_t pid = subject->pid;
     int memory_fd = subject->memory_fd;
 
-    scan_value_u value;
+    gval_u value;
     va_list args;
     va_start(args, scan);
 
     switch (scan->type)
     {
-        case SCANTYPE_UINT8: value.uint8 = (uint8_t)va_arg(args, unsigned); break;
-        case SCANTYPE_UINT16: value.uint16 = (uint16_t)va_arg(args, unsigned); break;
-        case SCANTYPE_UINT32: value.uint32 = va_arg(args, uint32_t); break;
-        case SCANTYPE_UINT64: value.uint64 = va_arg(args, uint64_t); break;
-        case SCANTYPE_INT8: value.int8 = (int8_t)va_arg(args, int); break;
-        case SCANTYPE_INT16: value.int16 = (int16_t)va_arg(args, int); break;
-        case SCANTYPE_INT32: value.int32 = va_arg(args, int32_t); break;
-        case SCANTYPE_INT64: value.int64 = va_arg(args, int64_t); break;
-        case SCANTYPE_FLOAT32: value.float32 = (float)va_arg(args, double); break;
-        case SCANTYPE_FLOAT64: value.float64 = va_arg(args, double); break;
+        case TYPE_UINT8: value.uint8 = (uint8_t)va_arg(args, unsigned); break;
+        case TYPE_UINT16: value.uint16 = (uint16_t)va_arg(args, unsigned); break;
+        case TYPE_UINT32: value.uint32 = va_arg(args, uint32_t); break;
+        case TYPE_UINT64: value.uint64 = va_arg(args, uint64_t); break;
+        case TYPE_INT8: value.int8 = (int8_t)va_arg(args, int); break;
+        case TYPE_INT16: value.int16 = (int16_t)va_arg(args, int); break;
+        case TYPE_INT32: value.int32 = va_arg(args, int32_t); break;
+        case TYPE_INT64: value.int64 = va_arg(args, int64_t); break;
+        case TYPE_FLOAT32: value.float32 = (float)va_arg(args, double); break;
+        case TYPE_FLOAT64: value.float64 = va_arg(args, double); break;
+        case TYPE_BYTES_16: {
+            const uint8_t *buffer = va_arg(args, uint8_t *);
+            memcpy(value.b16, buffer, 16);
+            break;
+        }
     }
 
     va_end(args);
 
     if (!subject_attach(subject)) {
-        fprintf(stderr, "error: failed to subject attach\n");
+        fprintf(stderr, "error: failed to attach to subject\n");
         return false;
     }
 
-    size_t value_size = scan_type_size(scan->type);
+    size_t value_size = scan_value_size(scan);
     for (size_t i=0; i < scan->hit_count; i++) {
         size_t hit = scan->hits[i];
         lseek(memory_fd, hit, SEEK_SET);
