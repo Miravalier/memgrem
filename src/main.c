@@ -163,15 +163,20 @@ static void get_command(command_u *command) {
 
         if (streq(cmd, "unlock")) {
             if (args->length != 2) {
-                printf("usage: unlock <addr>\n");
+                printf("usage: unlock <addr|all>\n");
                 continue;
             }
             command->type = CMD_SW_UNLOCK;
-            command->write_lock.value.location = strtoul(args->strings[1], &end, 16);
-            if (*end != '\0') {
-                printf("error: invalid address\n");
-                continue;
+            if (streq(args->strings[1], "all")) {
+                command->write_lock.value.location = 0;
+            } else {
+                command->write_lock.value.location = strtoul(args->strings[1], &end, 16);
+                if (*end != '\0') {
+                    printf("error: invalid address\n");
+                    continue;
+                }
             }
+            break;
         }
 
         if (streq(cmd, "quit") || streq(cmd, "q")) {

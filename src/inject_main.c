@@ -87,11 +87,13 @@ static void handle_request(void) {
             uintptr_t addr_to_unlock = control_buffer->lock_arg.location;
             size_t previous_lock_count = sw_lock_count;
             sw_lock_count = 0;
-            for (size_t i=0; i < previous_lock_count; i++) {
-                lock_t *previous_lock = sw_locks + i;
-                if (previous_lock->location != addr_to_unlock) {
-                    memcpy(sw_locks + sw_lock_count, previous_lock, sizeof(lock_t));
-                    sw_lock_count++;
+            if (addr_to_unlock != 0) {
+                for (size_t i=0; i < previous_lock_count; i++) {
+                    lock_t *previous_lock = sw_locks + i;
+                    if (previous_lock->location != addr_to_unlock) {
+                        memcpy(sw_locks + sw_lock_count, previous_lock, sizeof(lock_t));
+                        sw_lock_count++;
+                    }
                 }
             }
         }
