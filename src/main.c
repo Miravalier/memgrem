@@ -198,7 +198,7 @@ static void get_command(command_u *command) {
             break;
         }
 
-        if (streq(cmd, "=")) {
+        if (streq(cmd, "exact")) {
             if (args->length != 2) {
                 printf("usage: = <value>\n");
                 continue;
@@ -212,7 +212,7 @@ static void get_command(command_u *command) {
             break;
         }
 
-        if (streq(cmd, "~")) {
+        if (streq(cmd, "approximate")) {
             if (args->length != 2) {
                 printf("usage: ~ <value>\n");
                 continue;
@@ -226,7 +226,7 @@ static void get_command(command_u *command) {
             break;
         }
 
-        if (streq(cmd, "set") || streq(cmd, "s")) {
+        if (streq(cmd, "set")) {
             if (args->length != 2) {
                 printf("usage: set <value>\n");
                 continue;
@@ -240,7 +240,7 @@ static void get_command(command_u *command) {
             break;
         }
 
-        if (streq(cmd, "bounded") || streq(cmd, "bound") || streq(cmd, "b")) {
+        if (streq(cmd, "bounded")) {
             if (args->length != 3) {
                 printf("usage: set <min> <max>\n");
                 continue;
@@ -259,7 +259,7 @@ static void get_command(command_u *command) {
             break;
         }
 
-        if (streq(cmd, "refresh") || streq(cmd, "r")) {
+        if (streq(cmd, "refresh")) {
             command->type = CMD_REFRESH;
             break;
         }
@@ -304,12 +304,6 @@ int main(int argc, char **argv) {
     subject_t *subject = subject_create(pid);
     if (subject == NULL) {
         fprintf(stderr, "error: failed to attach to pid %d\n", pid);
-        return 1;
-    }
-
-    // Inject worker
-    if (!subject_inject_worker(subject)) {
-        fprintf(stderr, "error: failed to inject worker thread\n");
         return 1;
     }
 

@@ -535,6 +535,13 @@ subject_t *subject_create(pid_t pid) {
 
 
 static bool subject_issue_command(subject_t *subject, control_buffer_t *control_buffer) {
+    if (subject->control_buffer_address == 0) {
+        if (!subject_inject_worker(subject)) {
+            fprintf(stderr, "error: failed to inject worker thread\n");
+            return false;
+        }
+    }
+
     bool success = false;
     control_buffer->inbound = 1;
     control_buffer->magic_a = INJECT_MAGIC_A;
@@ -836,6 +843,8 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
     size_t so_file_size = 0;
     int status;
     uintptr_t result;
+    struct user_regs_struct starting_registers;
+    bool registers_saved = false;
 
     if (!subject_attach(subject)) {
         fprintf(stderr, "error: failed to attach to subject\n");
@@ -875,11 +884,11 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
     free_maps(subject_maps);
 
     // Save subject's starting registers
-    struct user_regs_struct starting_registers;
     if (ptrace(PTRACE_GETREGS, pid, NULL, &starting_registers) == -1) {
         fprintf(stderr, "error: failed to ptrace GETREGS: %s\n", strerror(errno));
         goto EXIT;
     }
+    registers_saved = true;
 
     // Create mmap region
     if (!subject_inject_syscall6(subject, &result, SYSCALL_MMAP, 0, 8192, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)) {
@@ -1020,6 +1029,7 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
         fprintf(stderr, "error: failed to PTRACE_SETREGS: %s\n", strerror(errno));
         goto EXIT;
     }
+    registers_saved = false;
 
     // Free mmap'd region
     if (!subject_inject_syscall2(subject, NULL, SYSCALL_MUNMAP, subject_mmap_region, 8192)) {
@@ -1030,6 +1040,10 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
     success = true;
 
   EXIT:
+    if (registers_saved) {
+        // Attempt to restore starting registers
+        ptrace(PTRACE_SETREGS, pid, NULL, &starting_registers);
+    }
     if (so_file_contents != NULL) {
         free(so_file_contents);
     }
