@@ -276,7 +276,7 @@ static void get_command(command_u *command) {
 int main(int argc, char **argv) {
     // Handle cmd line arguments
     if (argc != 2 && argc != 3) {
-        fprintf(stderr, "usage: %s <pid> [all|float|f32|f64]\n", argv[0]);
+        fprintf(stderr, "usage: %s <pid> [all|float|int|f32|f64|i32|i64]\n", argv[0]);
         return 1;
     }
 
@@ -310,15 +310,27 @@ int main(int argc, char **argv) {
     // Start scans
     scan_t *float32_scan = NULL;
     scan_t *float64_scan = NULL;
+    scan_t *int32_scan = NULL;
+    scan_t *int64_scan = NULL;
     size_t scan_count = 0;
 
     if (streq(mode, "all") || streq(mode, "float") || streq(mode, "f32")) {
-        float32_scan = subject_begin_scan(subject, TYPE_FLOAT32);
+        float32_scan = subject_begin_scan(subject);
         scan_count++;
     }
 
     if (streq(mode, "all") || streq(mode, "float") || streq(mode, "f64")) {
-        float64_scan = subject_begin_scan(subject, TYPE_FLOAT64);
+        float64_scan = subject_begin_scan(subject);
+        scan_count++;
+    }
+
+    if (streq(mode, "all") || streq(mode, "int") || streq(mode, "i32")) {
+        int32_scan = subject_begin_scan(subject);
+        scan_count++;
+    }
+
+    if (streq(mode, "all") || streq(mode, "int") || streq(mode, "i64")) {
+        int64_scan = subject_begin_scan(subject);
         scan_count++;
     }
 
@@ -372,22 +384,42 @@ int main(int argc, char **argv) {
         else if (command.type == CMD_FIND_BOUNDED) {
             scans_changed = true;
             if (float32_scan) {
-                if (!scan_update(float32_scan, SEARCH_GREATER, (float)command.bounded.min_value)) {
+                if (!scan_update(float32_scan, TYPE_FLOAT32, SEARCH_GREATER, (float)command.bounded.min_value)) {
                     printf("error: failed to float32 SEARCH_GREATER\n");
                     break;
                 }
-                if (!scan_update(float32_scan, SEARCH_LESS, (float)command.bounded.max_value)) {
+                if (!scan_update(float32_scan, TYPE_FLOAT32, SEARCH_LESS, (float)command.bounded.max_value)) {
                     printf("error: failed to float32 SEARCH_LESS\n");
                     break;
                 }
             }
             if (float64_scan) {
-                if (!scan_update(float64_scan, SEARCH_GREATER, command.bounded.min_value)) {
+                if (!scan_update(float64_scan, TYPE_FLOAT64, SEARCH_GREATER, command.bounded.min_value)) {
                     printf("error: failed to float64 SEARCH_GREATER\n");
                     break;
                 }
-                if (!scan_update(float64_scan, SEARCH_LESS, command.bounded.max_value)) {
+                if (!scan_update(float64_scan, TYPE_FLOAT64, SEARCH_LESS, command.bounded.max_value)) {
                     printf("error: failed to float64 SEARCH_LESS\n");
+                    break;
+                }
+            }
+            if (int32_scan) {
+                if (!scan_update(int32_scan, TYPE_INT32, SEARCH_GREATER, (int32_t)command.bounded.min_value)) {
+                    printf("error: failed to int32 SEARCH_GREATER\n");
+                    break;
+                }
+                if (!scan_update(int32_scan, TYPE_INT32, SEARCH_LESS, (int32_t)command.bounded.max_value)) {
+                    printf("error: failed to int32 SEARCH_LESS\n");
+                    break;
+                }
+            }
+            if (int64_scan) {
+                if (!scan_update(int64_scan, TYPE_INT64, SEARCH_GREATER, (int64_t)command.bounded.min_value)) {
+                    printf("error: failed to int64 SEARCH_GREATER\n");
+                    break;
+                }
+                if (!scan_update(int64_scan, TYPE_INT64, SEARCH_LESS, (int64_t)command.bounded.max_value)) {
+                    printf("error: failed to int64 SEARCH_LESS\n");
                     break;
                 }
             }
@@ -396,14 +428,26 @@ int main(int argc, char **argv) {
         else if (command.type == CMD_FIND_EXACT) {
             scans_changed = true;
             if (float32_scan) {
-                if (!scan_update(float32_scan, SEARCH_EQUAL, (float)command.exact.value)) {
+                if (!scan_update(float32_scan, TYPE_FLOAT32, SEARCH_EQUAL, (float)command.exact.value)) {
                     printf("error: failed to float32 SEARCH_EQUAL\n");
                     break;
                 }
             }
             if (float64_scan) {
-                if (!scan_update(float64_scan, SEARCH_EQUAL, command.exact.value)) {
+                if (!scan_update(float64_scan, TYPE_FLOAT64, SEARCH_EQUAL, command.exact.value)) {
                     printf("error: failed to float64 SEARCH_EQUAL\n");
+                    break;
+                }
+            }
+            if (int32_scan) {
+                if (!scan_update(int32_scan, TYPE_INT32, SEARCH_EQUAL, (int32_t)command.exact.value)) {
+                    printf("error: failed to int32 SEARCH_EQUAL\n");
+                    break;
+                }
+            }
+            if (int64_scan) {
+                if (!scan_update(int64_scan, TYPE_INT64, SEARCH_EQUAL, (int64_t)command.exact.value)) {
+                    printf("error: failed to int64 SEARCH_EQUAL\n");
                     break;
                 }
             }
@@ -412,14 +456,26 @@ int main(int argc, char **argv) {
         else if (command.type == CMD_FIND_APPROXIMATE) {
             scans_changed = true;
             if (float32_scan) {
-                if (!scan_update(float32_scan, SEARCH_APPROX, (float)command.exact.value)) {
-                    printf("error: failed to float32 SEARCH_EQUAL\n");
+                if (!scan_update(float32_scan, TYPE_FLOAT32, SEARCH_APPROX, (float)command.exact.value)) {
+                    printf("error: failed to float32 SEARCH_APPROX\n");
                     break;
                 }
             }
             if (float64_scan) {
-                if (!scan_update(float64_scan, SEARCH_APPROX, command.exact.value)) {
-                    printf("error: failed to float64 SEARCH_EQUAL\n");
+                if (!scan_update(float64_scan, TYPE_FLOAT64, SEARCH_APPROX, command.exact.value)) {
+                    printf("error: failed to float64 SEARCH_APPROX\n");
+                    break;
+                }
+            }
+            if (int32_scan) {
+                if (!scan_update(int32_scan, TYPE_INT32, SEARCH_APPROX, (int32_t)command.exact.value)) {
+                    printf("error: failed to int32 SEARCH_APPROX\n");
+                    break;
+                }
+            }
+            if (int64_scan) {
+                if (!scan_update(int64_scan, TYPE_INT64, SEARCH_APPROX, (int64_t)command.exact.value)) {
+                    printf("error: failed to int64 SEARCH_APPROX\n");
                     break;
                 }
             }
@@ -428,33 +484,54 @@ int main(int argc, char **argv) {
         else if (command.type == CMD_SET_VALUE) {
             scans_changed = true;
             if (float32_scan) {
-                if (!scan_set_value(float32_scan, (float)command.set.value)) {
+                if (!scan_set_value(float32_scan, TYPE_FLOAT32, (float)command.set.value)) {
                     printf("error: failed to float32 SET_VALUE\n");
                     break;
                 }
+                scan_refresh(float32_scan, TYPE_FLOAT32);
             }
             if (float64_scan) {
-                if (!scan_set_value(float64_scan, command.set.value)) {
+                if (!scan_set_value(float64_scan, TYPE_FLOAT64, command.set.value)) {
                     printf("error: failed to float64 SET_VALUE\n");
                     break;
                 }
+                scan_refresh(float64_scan, TYPE_FLOAT64);
+            }
+            if (int32_scan) {
+                if (!scan_set_value(int32_scan, TYPE_INT32, (int32_t)command.set.value)) {
+                    printf("error: failed to int32 SET_VALUE\n");
+                    break;
+                }
+                scan_refresh(int32_scan, TYPE_INT32);
+            }
+            if (int64_scan) {
+                if (!scan_set_value(int64_scan, TYPE_INT64, (int64_t)command.set.value)) {
+                    printf("error: failed to int64 SET_VALUE\n");
+                    break;
+                }
+                scan_refresh(int64_scan, TYPE_INT64);
             }
         }
 
         else if (command.type == CMD_REFRESH) {
             scans_changed = true;
             if (float32_scan) {
-                scan_refresh(float32_scan);
+                scan_refresh(float32_scan, TYPE_FLOAT32);
             }
             if (float64_scan) {
-                scan_refresh(float64_scan);
+                scan_refresh(float64_scan, TYPE_FLOAT64);
+            }
+            if (int32_scan) {
+                scan_refresh(int32_scan, TYPE_INT32);
+            }
+            if (int64_scan) {
+                scan_refresh(int64_scan, TYPE_INT64);
             }
         }
 
         else if (command.type == CMD_ELIMINATE) {
             scans_changed = true;
             bool eliminate_match = false;
-            scan_t *target_scan = NULL;
             size_t target_index = command.eliminate.value;
             if (float32_scan && !eliminate_match) {
                 if (target_index < float32_scan->hit_count) {
@@ -472,6 +549,22 @@ int main(int argc, char **argv) {
                     target_index -= float64_scan->hit_count;
                 }
             }
+            if (int32_scan && !eliminate_match) {
+                if (target_index < int32_scan->hit_count) {
+                    scan_eliminate(int32_scan, target_index);
+                    eliminate_match = true;
+                } else {
+                    target_index -= int32_scan->hit_count;
+                }
+            }
+            if (int64_scan && !eliminate_match) {
+                if (target_index < int64_scan->hit_count) {
+                    scan_eliminate(int64_scan, target_index);
+                    eliminate_match = true;
+                } else {
+                    target_index -= int64_scan->hit_count;
+                }
+            }
             if (!eliminate_match) {
                 printf("error: invalid index number\n");
                 continue;
@@ -486,29 +579,56 @@ int main(int argc, char **argv) {
             if (float64_scan) {
                 total_hit_count += float64_scan->hit_count;
             }
+            if (int32_scan) {
+                total_hit_count += int32_scan->hit_count;
+            }
+            if (int64_scan) {
+                total_hit_count += int64_scan->hit_count;
+            }
 
             printf("Matches: %zu\n", total_hit_count);
 
+            size_t section_limit = 48 / scan_count;
             size_t hit_index = 0;
             if (float32_scan) {
-                for (size_t i=0; i < 32 && i < float32_scan->hit_count; i++) {
+                for (size_t i=0; i < section_limit && i < float32_scan->hit_count; i++) {
                     gval_u value = float32_scan->values[i];
                     printf("%zu. %f 0x%zx (Float32)\n", hit_index+i, value.float32, float32_scan->hits[i]);
                 }
-                if (float32_scan->hit_count >= 32) {
+                if (float32_scan->hit_count >= section_limit) {
                     printf("...\n");
                 }
                 hit_index += float32_scan->hit_count;
             }
             if (float64_scan) {
-                for (size_t i=0; i < 32 && i < float64_scan->hit_count; i++) {
+                for (size_t i=0; i < section_limit && i < float64_scan->hit_count; i++) {
                     gval_u value = float64_scan->values[i];
                     printf("%zu. %lf 0x%zx (Float64)\n", hit_index+i, value.float64, float64_scan->hits[i]);
                 }
-                if (float64_scan->hit_count >= 32) {
+                if (float64_scan->hit_count >= section_limit) {
                     printf("...\n");
                 }
                 hit_index += float64_scan->hit_count;
+            }
+            if (int32_scan) {
+                for (size_t i=0; i < section_limit && i < int32_scan->hit_count; i++) {
+                    gval_u value = int32_scan->values[i];
+                    printf("%zu. %d 0x%zx (Int32)\n", hit_index+i, value.int32, int32_scan->hits[i]);
+                }
+                if (int32_scan->hit_count >= section_limit) {
+                    printf("...\n");
+                }
+                hit_index += int32_scan->hit_count;
+            }
+            if (int64_scan) {
+                for (size_t i=0; i < section_limit && i < int64_scan->hit_count; i++) {
+                    gval_u value = int64_scan->values[i];
+                    printf("%zu. %ld 0x%zx (Int64)\n", hit_index+i, value.int64, int64_scan->hits[i]);
+                }
+                if (int64_scan->hit_count >= section_limit) {
+                    printf("...\n");
+                }
+                hit_index += int64_scan->hit_count;
             }
         }
     }

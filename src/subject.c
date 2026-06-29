@@ -324,9 +324,9 @@ static void free_maps(maps_t *maps) {
 }
 
 
-static bool memory_search(scan_t *scan, size_t offset, size_t size, gval_u *value, search_op_e op) {
+static bool memory_search(scan_t *scan, gval_type_e type, size_t offset, size_t size, gval_u *value, search_op_e op) {
     int fd = scan->subject->memory_fd;
-    size_t value_size = scan_value_size(scan);
+    size_t value_size = gval_size(type);
 
     if (lseek(fd, offset, SEEK_SET) == -1) {
         fprintf(stderr, "error: failed to lseek memory file: %s\n", strerror(errno));
@@ -353,7 +353,7 @@ static bool memory_search(scan_t *scan, size_t offset, size_t size, gval_u *valu
         if (op == SEARCH_EQUAL) {
             while ((match = memmem(cursor, cursor_size, value, value_size))) {
                 if (scan->hit_count < 32) {
-                    gval_move(scan->type, scan->values + scan->hit_count, match);
+                    gval_move(type, scan->values + scan->hit_count, match);
                 }
                 if (scan->hit_count == scan->hit_capacity) {
                     scan->hit_capacity *= 2;
@@ -368,9 +368,9 @@ static bool memory_search(scan_t *scan, size_t offset, size_t size, gval_u *valu
             }
         } else {
             for (size_t i=0; i + value_size < cursor_size; i += value_size) {
-                if (gval_compare(scan->type, op, cursor + i, value)) {
+                if (gval_compare(type, op, cursor + i, value)) {
                     if (scan->hit_count < 32) {
-                        gval_move(scan->type, scan->values + scan->hit_count, cursor + i);
+                        gval_move(type, scan->values + scan->hit_count, cursor + i);
                     }
                     if (scan->hit_count == scan->hit_capacity) {
                         scan->hit_capacity *= 2;
@@ -391,9 +391,9 @@ static bool memory_search(scan_t *scan, size_t offset, size_t size, gval_u *valu
 }
 
 
-static bool memory_filter(scan_t *scan, gval_u *value, search_op_e op) {
+static bool memory_filter(scan_t *scan, gval_type_e type, gval_u *value, search_op_e op) {
     int fd = scan->subject->memory_fd;
-    size_t value_size = scan_value_size(scan);
+    size_t value_size = gval_size(type);
 
     uint8_t buffer[sizeof(gval_u)];
     size_t old_hit_count = scan->hit_count;
@@ -402,9 +402,9 @@ static bool memory_filter(scan_t *scan, gval_u *value, search_op_e op) {
         size_t hit_location = scan->hits[i];
         lseek(fd, hit_location, SEEK_SET);
         read(fd, buffer, value_size);
-        if (gval_compare(scan->type, op, buffer, value)) {
+        if (gval_compare(type, op, buffer, value)) {
             if (scan->hit_count < 32) {
-                gval_move(scan->type, scan->values + scan->hit_count, buffer);
+                gval_move(type, scan->values + scan->hit_count, buffer);
             }
             scan->hits[scan->hit_count++] = hit_location;
         }
@@ -753,8 +753,8 @@ bool subject_inject_worker(subject_t *subject) {
     }
 
     // Look for existing magic values from a previous injection
-    scan_t *magic_scan = subject_begin_scan(subject, TYPE_BYTES_16);
-    if (!scan_update(magic_scan, SEARCH_EQUAL, magic_bytes)) {
+    scan_t *magic_scan = subject_begin_scan(subject);
+    if (!scan_update(magic_scan, TYPE_BYTES_16, SEARCH_EQUAL, magic_bytes)) {
         fprintf(stderr, "error: could not start scan before injecting shared object\n");
         goto EXIT;
     }
@@ -784,7 +784,7 @@ bool subject_inject_worker(subject_t *subject) {
 
     // Look for the magic values again after injecting
     scan_reset(magic_scan);
-    if (!scan_update(magic_scan, SEARCH_EQUAL, magic_bytes)) {
+    if (!scan_update(magic_scan, TYPE_BYTES_16, SEARCH_EQUAL, magic_bytes)) {
         fprintf(stderr, "error: could not start scan after injecting shared object\n");
         goto EXIT;
     }
@@ -1052,14 +1052,13 @@ bool subject_inject_so(subject_t *subject, const char *so_path) {
 }
 
 
-scan_t *subject_begin_scan(subject_t *subject, gval_type_e type) {
+scan_t *subject_begin_scan(subject_t *subject) {
     if (subject == NULL) {
         return NULL;
     }
 
     scan_t *scan = malloc(sizeof(scan_t));
     scan->subject = (subject_t *)subject;
-    scan->type = type;
     scan->hits = NULL;
     scan->hit_count = 0;
     scan->hit_capacity = 0;
@@ -1094,11 +1093,6 @@ void subject_free(subject_t *subject) {
 }
 
 
-size_t scan_value_size(scan_t *scan) {
-    return gval_size(scan->type);
-}
-
-
 scan_t *scan_fork(scan_t *scan) {
     scan_t *result = malloc(sizeof(scan_t));
     memcpy(result, scan, sizeof(scan_t));
@@ -1109,7 +1103,7 @@ scan_t *scan_fork(scan_t *scan) {
 }
 
 
-bool scan_refresh(scan_t *scan) {
+bool scan_refresh(scan_t *scan, gval_type_e type) {
     bool success = false;
     subject_t *subject = scan->subject;
     pid_t pid = subject->pid;
@@ -1119,7 +1113,7 @@ bool scan_refresh(scan_t *scan) {
         return false;
     }
 
-    if (!memory_filter(scan, NULL, SEARCH_NOOP)) {
+    if (!memory_filter(scan, type, NULL, SEARCH_NOOP)) {
         goto EXIT;
     }
 
@@ -1143,7 +1137,7 @@ void scan_eliminate(scan_t *scan, size_t index) {
 }
 
 
-bool scan_update(scan_t *scan, search_op_e op, ...) {
+bool scan_update(scan_t *scan, gval_type_e type, search_op_e op, ...) {
     int memory_fd = -1;
     bool success = false;
     subject_t *subject = scan->subject;
@@ -1153,7 +1147,7 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
     va_list args;
     va_start(args, op);
 
-    switch (scan->type)
+    switch (type)
     {
         case TYPE_UINT8: value.uint8 = (uint8_t)va_arg(args, unsigned); break;
         case TYPE_UINT16: value.uint16 = (uint16_t)va_arg(args, unsigned); break;
@@ -1198,7 +1192,7 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
             if (!region->read || !region->write) {
                 continue;
             }
-            if (!memory_search(scan, region->offset, region->size, &value, op)) {
+            if (!memory_search(scan, type, region->offset, region->size, &value, op)) {
                 free_maps(maps);
                 goto EXIT;
             }
@@ -1206,7 +1200,7 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
 
         free_maps(maps);
     } else {
-        if (!memory_filter(scan, &value, op)) {
+        if (!memory_filter(scan, type, &value, op)) {
             goto EXIT;
         }
     }
@@ -1219,7 +1213,7 @@ bool scan_update(scan_t *scan, search_op_e op, ...) {
 }
 
 
-bool scan_set_value(scan_t *scan, ...) {
+bool scan_set_value(scan_t *scan, gval_type_e type, ...) {
     bool success = false;
     subject_t *subject = scan->subject;
     pid_t pid = subject->pid;
@@ -1227,9 +1221,9 @@ bool scan_set_value(scan_t *scan, ...) {
 
     gval_u value;
     va_list args;
-    va_start(args, scan);
+    va_start(args, type);
 
-    switch (scan->type)
+    switch (type)
     {
         case TYPE_UINT8: value.uint8 = (uint8_t)va_arg(args, unsigned); break;
         case TYPE_UINT16: value.uint16 = (uint16_t)va_arg(args, unsigned); break;
@@ -1255,7 +1249,7 @@ bool scan_set_value(scan_t *scan, ...) {
         return false;
     }
 
-    size_t value_size = scan_value_size(scan);
+    size_t value_size = gval_size(type);
     for (size_t i=0; i < scan->hit_count; i++) {
         size_t hit = scan->hits[i];
         lseek(memory_fd, hit, SEEK_SET);

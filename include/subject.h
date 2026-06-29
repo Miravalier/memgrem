@@ -23,7 +23,6 @@ typedef struct subject {
 
 typedef struct scan {
     struct subject *subject;
-    gval_type_e type;
     size_t *hits;
     size_t hit_count;
     size_t hit_capacity;
@@ -51,16 +50,15 @@ bool subject_command_sw_lock(subject_t *subject, lock_t *lock);
 bool subject_command_sw_unlock(subject_t *subject, uintptr_t addr);
 bool subject_command_print(subject_t *subject, const char *message);
 
-scan_t *subject_begin_scan(subject_t *subject, gval_type_e type);
+scan_t *subject_begin_scan(subject_t *subject);
 scan_t *scan_fork(scan_t *scan);
-bool scan_set_value(scan_t *scan, ...);
-bool scan_update(scan_t *scan, search_op_e op, ...);
+bool scan_set_value(scan_t *scan, gval_type_e type, ...);
+bool scan_update(scan_t *scan, gval_type_e type, search_op_e op, ...);
 void scan_eliminate(scan_t *scan, size_t index);
-bool scan_refresh(scan_t *scan);
+bool scan_refresh(scan_t *scan, gval_type_e type);
 void scan_print(scan_t *scan);
 void scan_free(scan_t *scan);
 void scan_reset(scan_t *scan);
-size_t scan_value_size(scan_t *scan);
 
 
 #endif
